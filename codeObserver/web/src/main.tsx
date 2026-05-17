@@ -46,10 +46,12 @@ import {
   Search,
   Send,
   Sparkles,
+  Terminal as TerminalIcon,
   Trash2,
   X,
 } from "lucide-react";
 import { loadAiCallGraph, loadAiRecommendedFlows, loadProject, loadSource, openSourceInIde, scanWorkspace, streamAiCodingContext, streamAiSummary } from "./api";
+import { TerminalPanel } from "./TerminalPanel";
 import type {
   AiCallGraphResponse,
   ClassInfo,
@@ -97,6 +99,7 @@ type PackageGroup = {
 
 type GraphMode = "code" | "ai";
 type DrawerTab = "source" | "ai";
+type BottomToolTab = "flow" | "terminal";
 
 type AiOutputMode = "explain" | "context";
 
@@ -151,6 +154,7 @@ type AiCacheEntry = {
 
 const AI_CACHE_PREFIX = "codeObserver.ai.v1";
 const PROJECTS_COLLAPSED_STORAGE_KEY = "codeObserver.projectsCollapsed.v1";
+const BOTTOM_TOOL_ACTIVE_TAB_STORAGE_KEY = "codeObserver.bottomTool.activeTab";
 const TRACE_PANEL_COLLAPSED_STORAGE_KEY = "codeObserver.tracePanelCollapsed.v1";
 const TRACE_PANEL_HEIGHT_STORAGE_KEY = "codeObserver.tracePanelHeight.v1";
 const NAVIGATOR_WIDTH_STORAGE_KEY = "codeObserver.navigatorWidth.v1";
@@ -180,6 +184,7 @@ function App() {
   const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false);
   const [activeDrawerTab, setActiveDrawerTab] = useState<DrawerTab>("source");
   const [tracePanelCollapsed, setTracePanelCollapsed] = useState(() => readBooleanPreference(TRACE_PANEL_COLLAPSED_STORAGE_KEY));
+  const [bottomToolTab, setBottomToolTab] = useState<BottomToolTab>(() => readBottomToolTabPreference());
   const [tracePanelHeight, setTracePanelHeight] = useState(() =>
     readNumberPreference(TRACE_PANEL_HEIGHT_STORAGE_KEY, TRACE_PANEL_HEIGHT_DEFAULT, TRACE_PANEL_HEIGHT_MIN, TRACE_PANEL_HEIGHT_MAX),
   );
@@ -220,6 +225,10 @@ function App() {
   useEffect(() => {
     writeBooleanPreference(TRACE_PANEL_COLLAPSED_STORAGE_KEY, tracePanelCollapsed);
   }, [tracePanelCollapsed]);
+
+  useEffect(() => {
+    writeStringPreference(BOTTOM_TOOL_ACTIVE_TAB_STORAGE_KEY, bottomToolTab);
+  }, [bottomToolTab]);
 
   useEffect(() => {
     writeNumberPreference(TRACE_PANEL_HEIGHT_STORAGE_KEY, tracePanelHeight);
@@ -372,6 +381,10 @@ function App() {
   const selectedTrace = useMemo(
     () => businessTraces.find((trace) => trace.id === selectedTraceId),
     [businessTraces, selectedTraceId],
+  );
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId),
+    [projects, selectedProjectId],
   );
 
   const aiCacheKey = useMemo(() => {
@@ -1171,11 +1184,13 @@ function App() {
             aria-valuemax={TRACE_PANEL_HEIGHT_MAX}
             aria-valuenow={tracePanelHeight}
             tabIndex={tracePanelCollapsed ? -1 : 0}
-            title="拖拽调整推荐 Flow 面板高度"
+            title="拖拽调整底部工具窗口高度"
             onMouseDown={handleTraceResizeMouseDown}
             onKeyDown={handleTraceResizeKeyDown}
           />
-          <TraceExplorer
+          <BottomToolWindow
+            activeTab={bottomToolTab}
+            onActiveTabChange={setBottomToolTab}
             detail={detail}
             traces={businessTraces}
             selectedTraceId={selectedTraceId}
@@ -1190,6 +1205,9 @@ function App() {
               openSourceDrawer();
             }}
             onSelectTrace={selectTrace}
+            terminalRoot={workspaceRoot || root}
+            terminalProjectId={selectedProjectId}
+            terminalProjectPath={selectedProject?.path ?? ""}
           />
         </section>
 
@@ -1316,6 +1334,126 @@ function PanelTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
       {icon}
       <h2>{title}</h2>
     </div>
+  );
+}
+
+function BottomToolWindow({
+  activeTab,
+  onActiveTabChange,
+  detail,
+  traces,
+  selectedTraceId,
+  selectedNodeId,
+  collapsed,
+  aiFlowLoading,
+  aiFlowError,
+  onToggleCollapsed,
+  onGenerateAiFlows,
+  onSelectNode,
+  onSelectTrace,
+  terminalRoot,
+  terminalProjectId,
+  terminalProjectPath,
+}: {
+  activeTab: BottomToolTab;
+  onActiveTabChange: (tab: BottomToolTab) => void;
+  detail: ProjectDetail | null;
+  traces: BusinessTrace[];
+  selectedTraceId: string;
+  selectedNodeId?: string;
+  collapsed: boolean;
+  aiFlowLoading: boolean;
+  aiFlowError: string;
+  onToggleCollapsed: () => void;
+  onGenerateAiFlows: () => void;
+  onSelectNode: (nodeId: string, filePath: string, line: number) => void;
+  onSelectTrace: (trace: BusinessTrace) => void;
+  terminalRoot: string;
+  terminalProjectId: string;
+  terminalProjectPath: string;
+}) {
+  const selectedTrace = traces.find((trace) => trace.id === selectedTraceId);
+  const activeLabel = activeTab === "flow" ? "Flow" : "Terminal";
+  const activeSummary = activeTab === "flow"
+    ? selectedTrace?.title ?? "推荐 Flow 和链路步骤"
+    : terminalProjectPath || terminalRoot || "网页内嵌终端";
+
+  function handleTabsKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    onActiveTabChange(activeTab === "flow" ? "terminal" : "flow");
+  }
+
+  if (collapsed) {
+    return (
+      <section className="bottom-tool-window collapsed">
+        <button className="trace-collapse-rail" type="button" onClick={onToggleCollapsed} title="展开底部工具窗口">
+          <PanelBottomOpen size={15} />
+          <strong>{activeLabel}</strong>
+          <span>{activeSummary}</span>
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="bottom-tool-window">
+      <div className="bottom-tool-tabbar" role="tablist" aria-label="底部工具窗口" onKeyDown={handleTabsKeyDown}>
+        <button
+          className={activeTab === "flow" ? "active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "flow"}
+          onClick={() => onActiveTabChange("flow")}
+        >
+          <Route size={14} />
+          <span>Flow</span>
+        </button>
+        <button
+          className={activeTab === "terminal" ? "active" : ""}
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "terminal"}
+          onClick={() => onActiveTabChange("terminal")}
+        >
+          <TerminalIcon size={14} />
+          <span>Terminal</span>
+        </button>
+        <Button
+          className="bottom-tool-collapse"
+          htmlType="button"
+          onClick={onToggleCollapsed}
+          title="折叠底部工具窗口"
+          icon={<PanelBottomClose size={15} />}
+        />
+      </div>
+      <div className="bottom-tool-content">
+        {activeTab === "flow" ? (
+          <TraceExplorer
+            detail={detail}
+            traces={traces}
+            selectedTraceId={selectedTraceId}
+            selectedNodeId={selectedNodeId}
+            collapsed={false}
+            aiFlowLoading={aiFlowLoading}
+            aiFlowError={aiFlowError}
+            onToggleCollapsed={onToggleCollapsed}
+            onGenerateAiFlows={onGenerateAiFlows}
+            onSelectNode={onSelectNode}
+            onSelectTrace={onSelectTrace}
+          />
+        ) : (
+          <TerminalPanel
+            root={terminalRoot}
+            projectId={terminalProjectId}
+            projectPath={terminalProjectPath}
+            active={activeTab === "terminal"}
+          />
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -2216,6 +2354,23 @@ function readBooleanPreference(key: string) {
   }
 }
 
+function readBottomToolTabPreference(): BottomToolTab {
+  try {
+    const value = browserLocalStorage()?.getItem(BOTTOM_TOOL_ACTIVE_TAB_STORAGE_KEY);
+    return value === "terminal" ? "terminal" : "flow";
+  } catch {
+    return "flow";
+  }
+}
+
+function writeStringPreference(key: string, value: string) {
+  try {
+    browserLocalStorage()?.setItem(key, value);
+  } catch {
+    // Best-effort UI preference only.
+  }
+}
+
 function writeBooleanPreference(key: string, value: boolean) {
   try {
     browserLocalStorage()?.setItem(key, value ? "true" : "false");
@@ -2444,7 +2599,7 @@ function TraceExplorer({
     <section className="reading-path">
       <div className="trace-column">
         <div className="trace-header-row">
-          <PanelTitle icon={<Route size={16} />} title="推荐 Flow" />
+          <PanelTitle icon={<Route size={16} />} title="Flow" />
           <div className="trace-header-actions">
             <Button
               htmlType="button"

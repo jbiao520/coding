@@ -250,6 +250,28 @@ export type OpenInIdeResponse = {
   command: string;
 };
 
+export type TerminalSessionRequest = {
+  projectId: string;
+  root: string;
+  cwd: string;
+  cols: number;
+  rows: number;
+};
+
+export type TerminalSessionInfo = {
+  id: string;
+  title: string;
+  cwd: string;
+  projectId: string;
+  shell: string;
+  createdAt: string;
+  alive: boolean;
+};
+
+export type TerminalSessionListResponse = {
+  sessions: TerminalSessionInfo[];
+};
+
 export type AiCallGraphNode = {
   id: string;
   label: string;

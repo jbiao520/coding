@@ -10,6 +10,9 @@ import type {
   OpenInIdeResponse,
   ProjectDetail,
   SourceResponse,
+  TerminalSessionInfo,
+  TerminalSessionListResponse,
+  TerminalSessionRequest,
   WorkspaceSnapshot,
 } from "./types";
 
@@ -20,6 +23,9 @@ async function getJson<T>(path: string): Promise<T> {
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `Request failed: ${response.status}`);
+  }
+  if (response.status === 204) {
+    return undefined as T;
   }
   return response.json() as Promise<T>;
 }
@@ -34,7 +40,18 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     const text = await response.text();
     throw new Error(text || `Request failed: ${response.status}`);
   }
+  if (response.status === 204) {
+    return undefined as T;
+  }
   return response.json() as Promise<T>;
+}
+
+async function deleteRequest(path: string): Promise<void> {
+  const response = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Request failed: ${response.status}`);
+  }
 }
 
 export function scanWorkspace(root: string): Promise<WorkspaceSnapshot> {
@@ -69,6 +86,32 @@ export function loadAiRecommendedFlows(request: AiFlowRecommendationRequest): Pr
 
 export function loadAiCodingContext(request: AiCodingContextRequest): Promise<AiCodingContextResponse> {
   return postJson<AiCodingContextResponse>("/api/ai/context", request);
+}
+
+export function createTerminalSession(request: TerminalSessionRequest): Promise<TerminalSessionInfo> {
+  return postJson<TerminalSessionInfo>("/api/terminal/sessions", request);
+}
+
+export function listTerminalSessions(root: string): Promise<TerminalSessionListResponse> {
+  const query = root.trim() ? `?root=${encodeURIComponent(root.trim())}` : "";
+  return getJson<TerminalSessionListResponse>(`/api/terminal/sessions${query}`);
+}
+
+export function resizeTerminalSession(id: string, cols: number, rows: number): Promise<void> {
+  return postJson<void>(`/api/terminal/sessions/${encodeURIComponent(id)}/resize`, { cols, rows });
+}
+
+export function closeTerminalSession(id: string): Promise<void> {
+  return deleteRequest(`/api/terminal/sessions/${encodeURIComponent(id)}`);
+}
+
+export function terminalWebSocketUrl(id: string): string {
+  const base = new URL(API_BASE, window.location.href);
+  base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+  base.pathname = `/api/terminal/sessions/${encodeURIComponent(id)}/ws`;
+  base.search = "";
+  base.hash = "";
+  return base.toString();
 }
 
 export async function streamAiSummary(

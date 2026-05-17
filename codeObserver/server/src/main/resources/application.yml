@@ -14,6 +14,13 @@ spring:
 observer:
   max-depth: 7
 
+code-observer:
+  terminal:
+    enabled: true
+    shell: ${CODE_OBSERVER_TERMINAL_SHELL:/bin/zsh}
+    idle-timeout-minutes: ${CODE_OBSERVER_TERMINAL_IDLE_TIMEOUT_MINUTES:120}
+    max-sessions: ${CODE_OBSERVER_TERMINAL_MAX_SESSIONS:8}
+
 learning-flow:
   ai:
     mode: ${LEARNING_FLOW_AI_MODE:deepseek}
