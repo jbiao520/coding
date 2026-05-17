@@ -1,5 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
+import Alert from "antd/es/alert";
+import Button from "antd/es/button";
+import ConfigProvider from "antd/es/config-provider";
+import Input from "antd/es/input";
+import Segmented from "antd/es/segmented";
+import Tag from "antd/es/tag";
+import "antd/dist/reset.css";
 import ReactMarkdown from "react-markdown";
 import {
   Background,
@@ -58,6 +65,8 @@ import type {
   SourceResponse,
 } from "./types";
 import "./styles.css";
+
+const { TextArea } = Input;
 
 type Selection = {
   nodeId?: string;
@@ -580,7 +589,15 @@ function App() {
     if (!detail || !selectedProjectId) {
       return;
     }
-    const cacheKey = aiCacheKey;
+    const requestedQuestion = question.trim();
+    const cacheKey = buildAiCacheKey({
+      root: workspaceRoot || root,
+      projectId: selectedProjectId,
+      traceId: selectedTrace?.id,
+      nodeId: selectedTrace ? undefined : selection.nodeId,
+      question: requestedQuestion,
+      pinsKey: pinnedSnippets.map((snippet) => snippet.id).join("|"),
+    });
     let content = "";
     setAiOutputMode("explain");
     setAiLoading(true);
@@ -593,7 +610,7 @@ function App() {
       selectedNodeId: selection.nodeId,
       flowId: selectedTrace?.isBackendFlow ? selectedTrace.id : undefined,
       trace: selectedTrace,
-      question,
+      question: requestedQuestion,
     }, (chunk) => {
       content += chunk;
       setAiSummary((current) => current + chunk);
@@ -603,7 +620,7 @@ function App() {
         if (cacheKey) {
           writeAiCache(cacheKey, {
             outputMode: "explain",
-            question,
+            question: requestedQuestion,
             summary: content.trim(),
             model: response.model,
             context: aiContext,
@@ -620,7 +637,15 @@ function App() {
     if (!detail || !selectedProjectId) {
       return;
     }
-    const cacheKey = aiCacheKey;
+    const requestedTask = task.trim();
+    const cacheKey = buildAiCacheKey({
+      root: workspaceRoot || root,
+      projectId: selectedProjectId,
+      traceId: selectedTrace?.id,
+      nodeId: selectedTrace ? undefined : selection.nodeId,
+      question: requestedTask,
+      pinsKey: pinnedSnippets.map((snippet) => snippet.id).join("|"),
+    });
     let content = "";
     setAiOutputMode("context");
     setAiContextLoading(true);
@@ -634,7 +659,7 @@ function App() {
       selectedNodeId: selection.nodeId,
       flowId: selectedTrace?.isBackendFlow ? selectedTrace.id : undefined,
       trace: selectedTrace,
-      task,
+      task: requestedTask,
       pinnedSnippets,
     }, (chunk) => {
       content += chunk;
@@ -645,7 +670,7 @@ function App() {
         if (cacheKey) {
           writeAiCache(cacheKey, {
             outputMode: "context",
-            question: task,
+            question: requestedTask,
             summary: aiSummary,
             model: aiModel,
             context: content.trim(),
@@ -963,21 +988,22 @@ function App() {
             void handleScan(root);
           }}
         >
-          <FolderSearch size={17} />
-          <input
+          <Input
             aria-label="源码根目录"
+            className="root-input"
+            variant="borderless"
+            prefix={<FolderSearch size={17} />}
             value={root}
             onChange={(event) => setRoot(event.target.value)}
             placeholder="/path/to/workspace"
           />
-          <button type="submit" title="扫描目录">
-            <RefreshCw size={16} />
-            <span>扫描</span>
-          </button>
+          <Button type="primary" htmlType="submit" title="扫描目录" icon={<RefreshCw size={16} />}>
+            扫描
+          </Button>
         </form>
       </header>
 
-      {error ? <div className="error-bar">{error}</div> : null}
+      {error ? <Alert className="error-bar" type="error" message={error} banner /> : null}
 
       <section
         className={[
@@ -990,14 +1016,14 @@ function App() {
         <aside className="projects-panel">
           <div className="panel-header">
             {!projectsCollapsed ? <PanelTitle icon={<BookOpen size={16} />} title="项目" /> : null}
-            <button
+            <Button
               className="panel-collapse-button"
-              type="button"
+              htmlType="button"
+              aria-label={projectsCollapsed ? "展开项目" : "折叠项目"}
               onClick={() => setProjectsCollapsed((collapsed) => !collapsed)}
               title={projectsCollapsed ? "展开项目" : "折叠项目"}
-            >
-              {projectsCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
-            </button>
+              icon={projectsCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            />
           </div>
           {projectsCollapsed ? (
             <div className="collapsed-rail">
@@ -1026,8 +1052,16 @@ function App() {
         <aside className="navigator-panel">
           <PanelTitle icon={<Search size={16} />} title="结构" />
           <div className="search-box">
-            <Search size={15} />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索类、方法、概念" />
+            <Input
+              className="search-input"
+              size="small"
+              variant="borderless"
+              prefix={<Search size={15} />}
+              allowClear
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索类、方法、概念"
+            />
           </div>
           <div className="class-tree">
             {packageGroups.map((group) => (
@@ -1071,46 +1105,42 @@ function App() {
               </p>
             </div>
             <div className="graph-actions">
-              <button
+              <Button
                 className={`ai-graph-trigger ${graphMode === "ai" ? "active" : ""}`}
-                type="button"
                 onClick={handleAiCallGraph}
                 disabled={!detail || aiGraphLoading}
                 title={graphMode === "ai" && aiGraph ? "切回源码生成的调用图" : "AI 生成解释版调用图"}
+                icon={<Sparkles size={15} />}
               >
-                <Sparkles size={15} />
-                <span>{aiGraphLoading ? "生成中" : graphMode === "ai" && aiGraph ? "源码图" : "AI 生成图"}</span>
-              </button>
-              <button
+                {aiGraphLoading ? "生成中" : graphMode === "ai" && aiGraph ? "源码图" : "AI 生成图"}
+              </Button>
+              <Button
                 className={`ai-summary-trigger ${aiTabActive && aiOutputMode === "explain" ? "active" : ""}`}
-                type="button"
                 onClick={() => openAiDrawer("")}
                 disabled={!detail}
                 title={aiTabActive && aiOutputMode === "explain" ? "AI 解释已打开" : "AI 解释当前链路"}
+                icon={<Sparkles size={15} />}
               >
-                <Sparkles size={15} />
-                <span>{aiLoading ? "生成中" : "AI 解释"}</span>
-              </button>
-              <button
+                {aiLoading ? "生成中" : "AI 解释"}
+              </Button>
+              <Button
                 className={`ai-context-trigger ${aiTabActive && aiOutputMode === "context" ? "active" : ""}`}
-                type="button"
                 onClick={() => openContextDrawer()}
                 disabled={!detail}
                 title={aiTabActive && aiOutputMode === "context" ? "Context 已打开" : "生成可粘贴给代码模型的链路 Context"}
+                icon={<Clipboard size={15} />}
               >
-                <Clipboard size={15} />
-                <span>{aiContextLoading ? "生成中" : "Context"}</span>
-              </button>
-              <button
+                {aiContextLoading ? "生成中" : "Context"}
+              </Button>
+              <Button
                 className={`source-toggle ${sourceTabActive ? "active" : ""}`}
-                type="button"
                 onClick={toggleSourceDrawer}
                 title={sourceTabActive ? "关闭源码抽屉" : "显示源码"}
+                icon={sourceTabActive ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
               >
-                {sourceTabActive ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
-                <span>源码</span>
-              </button>
-              <div className="status-pill" title={loading ? "加载中" : "已就绪"}>{loading ? "加载中" : "就绪"}</div>
+                源码
+              </Button>
+              <Tag className="status-pill" color={loading ? "processing" : "default"}>{loading ? "加载中" : "就绪"}</Tag>
             </div>
           </div>
           <ReadingGuide
@@ -1174,33 +1204,39 @@ function App() {
 
         <aside className={`workspace-drawer side-drawer ${workspaceDrawerOpen ? "open" : ""}`} aria-hidden={!workspaceDrawerOpen}>
           <div className="drawer-header">
-            <div className="drawer-tabs" role="tablist" aria-label="源码和 AI 解释">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeDrawerTab === "source"}
-                className={activeDrawerTab === "source" ? "active" : ""}
-                onClick={() => setActiveDrawerTab("source")}
-                title="源码"
-              >
-                <FileCode2 size={15} />
-                <span>源码</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeDrawerTab === "ai"}
-                className={activeDrawerTab === "ai" ? "active" : ""}
-                onClick={() => setActiveDrawerTab("ai")}
-                title="AI 解释"
-              >
-                <Sparkles size={15} />
-                <span>AI 解释</span>
-              </button>
-            </div>
-            <button type="button" onClick={() => setWorkspaceDrawerOpen(false)} title="关闭抽屉">
-              <X size={16} />
-            </button>
+            <Segmented<DrawerTab>
+              className="drawer-tabs"
+              aria-label="源码和 AI 解释"
+              value={activeDrawerTab}
+              onChange={(value) => setActiveDrawerTab(value)}
+              options={[
+                {
+                  value: "source",
+                  label: (
+                    <span className="segmented-label">
+                      <FileCode2 size={15} />
+                      源码
+                    </span>
+                  ),
+                },
+                {
+                  value: "ai",
+                  label: (
+                    <span className="segmented-label">
+                      <Sparkles size={15} />
+                      AI 解释
+                    </span>
+                  ),
+                },
+              ]}
+            />
+            <Button
+              className="drawer-close-button"
+              htmlType="button"
+              onClick={() => setWorkspaceDrawerOpen(false)}
+              title="关闭抽屉"
+              icon={<X size={16} />}
+            />
           </div>
           <div className="drawer-body">
             {activeDrawerTab === "source" ? (
@@ -1250,7 +1286,7 @@ function App() {
                   sourceLinks={aiSourceLinks}
                   pinnedSnippets={pinnedSnippets}
                   onQuestionChange={setAiQuestion}
-                  onAsk={() => openAiDrawer(aiQuestion, true)}
+                  onAsk={(questionOverride) => openAiDrawer(questionOverride ?? aiQuestion, true)}
                   onGenerateContext={() => openContextDrawer(true)}
                   onCopyContext={copyAiContext}
                   onClearHistory={clearAiHistory}
@@ -1290,7 +1326,9 @@ function Concepts({ concepts }: { concepts: string[] }) {
   return (
     <div className="concepts">
       {concepts.map((concept) => (
-        <span key={concept}>{concept}</span>
+        <Tag key={concept} color="green">
+          {concept}
+        </Tag>
       ))}
     </div>
   );
@@ -2306,6 +2344,53 @@ function compactExplanation(value: string) {
   return text.length > 360 ? `${text.slice(0, 356)}...` : text;
 }
 
+function extractFollowUpQuestions(markdown: string) {
+  const lines = markdown.split(/\r?\n/);
+  let headingIndex = -1;
+  lines.forEach((line, index) => {
+    const normalized = line.replace(/^[#>\s*-]+/, "").trim();
+    if (/追问|继续问|后续问题|延伸问题|适合.*问/.test(normalized)) {
+      headingIndex = index;
+    }
+  });
+  if (headingIndex < 0) {
+    return { content: markdown, questions: [] };
+  }
+
+  const before = lines.slice(0, headingIndex).join("\n").trim();
+  const section = lines.slice(headingIndex + 1);
+  const questions: string[] = [];
+  for (const line of section) {
+    const question = normalizeFollowUpQuestion(line);
+    if (question) {
+      questions.push(question);
+    }
+  }
+
+  const uniqueQuestions = Array.from(new Set(questions)).slice(0, 4);
+  if (!uniqueQuestions.length) {
+    return { content: markdown, questions: [] };
+  }
+  return { content: before || markdown, questions: uniqueQuestions };
+}
+
+function normalizeFollowUpQuestion(line: string) {
+  const stripped = line
+    .trim()
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+[.)、]\s*/, "")
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
+    .replace(/\*\*/g, "")
+    .trim();
+  if (!stripped || stripped.length < 4) {
+    return "";
+  }
+  if (!/[？?]$/.test(stripped) && stripped.length > 64) {
+    return "";
+  }
+  return stripped;
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -2361,12 +2446,19 @@ function TraceExplorer({
         <div className="trace-header-row">
           <PanelTitle icon={<Route size={16} />} title="推荐 Flow" />
           <div className="trace-header-actions">
-            <button type="button" onClick={onGenerateAiFlows} disabled={aiFlowLoading} title="基于当前选中类或方法生成推荐 Flow">
-              <Sparkles size={15} />
-            </button>
-            <button type="button" onClick={onToggleCollapsed} title="折叠推荐 Flow 和步骤">
-              <PanelBottomClose size={15} />
-            </button>
+            <Button
+              htmlType="button"
+              onClick={onGenerateAiFlows}
+              disabled={aiFlowLoading}
+              title="基于当前选中类或方法生成推荐 Flow"
+              icon={<Sparkles size={15} />}
+            />
+            <Button
+              htmlType="button"
+              onClick={onToggleCollapsed}
+              title="折叠推荐 Flow 和步骤"
+              icon={<PanelBottomClose size={15} />}
+            />
           </div>
         </div>
         <div className="trace-list">
@@ -2504,7 +2596,7 @@ function AiAssistantPanel({
   sourceLinks: SourceLink[];
   pinnedSnippets: PinnedSourceSnippet[];
   onQuestionChange: (value: string) => void;
-  onAsk: () => void;
+  onAsk: (questionOverride?: string) => void;
   onGenerateContext: () => void;
   onCopyContext: () => void;
   onClearHistory: () => void;
@@ -2515,58 +2607,69 @@ function AiAssistantPanel({
   const activeModel = outputMode === "context" ? contextModel : model;
   const activeError = outputMode === "context" ? contextError : error;
   const hasHistory = Boolean(summary || model || error || context || contextModel || contextError);
+  const summaryResult = useMemo(() => extractFollowUpQuestions(summary), [summary]);
+
+  function askFollowUp(nextQuestion: string) {
+    if (disabled || loading || contextLoading) {
+      return;
+    }
+    onQuestionChange(nextQuestion);
+    onAsk(nextQuestion);
+  }
+
   return (
     <div className="ai-panel">
       <div className="ai-box">
-        <textarea
+        <TextArea
           value={question}
           onChange={(event) => onQuestionChange(event.target.value)}
           placeholder="问这条链路，或描述你准备让代码模型完成的改动目标"
           disabled={disabled || loading || contextLoading}
+          autoSize={{ minRows: 3, maxRows: 6 }}
         />
         <div className="ai-actions">
           {activeModel ? <span>模型：{activeModel}</span> : <span>选择调用链后生成解释或编码 Context</span>}
         </div>
         <div className="ai-command-row">
-          <button
+          <Button
             className={outputMode === "explain" ? "active" : ""}
-            type="button"
-            onClick={onAsk}
+            htmlType="button"
+            onClick={() => onAsk()}
             disabled={disabled || loading || contextLoading}
             title="解释当前链路"
+            icon={loading ? <RefreshCw size={14} /> : <Send size={14} />}
           >
-            {loading ? <RefreshCw size={14} /> : <Send size={14} />}
-            <span>{loading ? "生成中" : summary ? "重新解释" : "解释"}</span>
-          </button>
-          <button
+            {loading ? "生成中" : summary ? "重新解释" : "解释"}
+          </Button>
+          <Button
             className={outputMode === "context" ? "active" : ""}
-            type="button"
+            htmlType="button"
             onClick={onGenerateContext}
             disabled={disabled || loading || contextLoading}
             title="生成可粘贴给代码模型的链路 Context"
+            icon={contextLoading ? <RefreshCw size={14} /> : <Clipboard size={14} />}
           >
-            {contextLoading ? <RefreshCw size={14} /> : <Clipboard size={14} />}
-            <span>{contextLoading ? "生成中" : "Context"}</span>
-          </button>
-          <button
-            type="button"
+            {contextLoading ? "生成中" : "Context"}
+          </Button>
+          <Button
+            htmlType="button"
             onClick={onCopyContext}
             disabled={!context || contextLoading}
             title="复制 Context"
+            icon={contextCopied ? <ClipboardCheck size={14} /> : <Clipboard size={14} />}
           >
-            {contextCopied ? <ClipboardCheck size={14} /> : <Clipboard size={14} />}
-            <span>{contextCopied ? "已复制" : "复制"}</span>
-          </button>
-          <button
+            {contextCopied ? "已复制" : "复制"}
+          </Button>
+          <Button
             className="clear-history"
-            type="button"
+            htmlType="button"
             onClick={onClearHistory}
             disabled={disabled || loading || contextLoading || !hasHistory}
             title="清空 AI 输出历史"
+            icon={<Trash2 size={14} />}
           >
-            <Trash2 size={14} />
-            <span>清空</span>
-          </button>
+            清空
+          </Button>
         </div>
         {sourceLinks.length ? (
           <div className="ai-source-links" aria-label="相关源码">
@@ -2585,9 +2688,7 @@ function AiAssistantPanel({
           <div className="pinned-snippets" aria-label="固定源码片段">
             <div>
               <strong>固定 Context</strong>
-              <button type="button" onClick={onClearPins} title="清空固定片段">
-                <Trash2 size={12} />
-              </button>
+              <Button htmlType="button" size="small" onClick={onClearPins} title="清空固定片段" icon={<Trash2 size={12} />} />
             </div>
             <div>
               {pinnedSnippets.map((snippet) => (
@@ -2595,9 +2696,13 @@ function AiAssistantPanel({
                   <Pin size={11} />
                   <strong>{snippet.label}</strong>
                   <small>{fileLocationLabel(snippet.filePath, snippet.beginLine)}</small>
-                  <button type="button" onClick={() => onRemovePin(snippet.id)} title="移除固定片段">
-                    <X size={11} />
-                  </button>
+                  <Button
+                    htmlType="button"
+                    size="small"
+                    onClick={() => onRemovePin(snippet.id)}
+                    title="移除固定片段"
+                    icon={<X size={11} />}
+                  />
                 </span>
               ))}
             </div>
@@ -2612,7 +2717,26 @@ function AiAssistantPanel({
           ) : outputMode === "context" ? (
             <p>选择调用链后生成 Context。上方输入框可以补充这次准备修改的目标，输出会更适合直接放进代码模型的 prompt。</p>
           ) : summary ? (
-            <ReactMarkdown>{summary}</ReactMarkdown>
+            <>
+              <ReactMarkdown>{summaryResult.content}</ReactMarkdown>
+              {summaryResult.questions.length ? (
+                <div className="ai-follow-ups" aria-label="适合继续追问的问题">
+                  <strong>继续追问</strong>
+                  <div>
+                    {summaryResult.questions.map((nextQuestion) => (
+                      <button
+                        key={nextQuestion}
+                        type="button"
+                        onClick={() => askFollowUp(nextQuestion)}
+                        disabled={disabled || loading || contextLoading}
+                      >
+                        {nextQuestion}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </>
           ) : loading ? (
             <p>正在生成解释，内容会实时显示在这里。</p>
           ) : (
@@ -2788,25 +2912,16 @@ function SourceViewer({
     <div className="source-view">
       <div className="source-toolbar">
         <div className="source-nav-actions" aria-label="源码跳转历史">
-          <button type="button" onClick={onBack} disabled={!canGoBack} title="后退到上一次源码跳转">
-            <ChevronLeft size={14} />
-          </button>
-          <button type="button" onClick={onForward} disabled={!canGoForward} title="前进到下一次源码跳转">
-            <ChevronRight size={14} />
-          </button>
+          <Button htmlType="button" onClick={onBack} disabled={!canGoBack} title="后退到上一次源码跳转" icon={<ChevronLeft size={14} />} />
+          <Button htmlType="button" onClick={onForward} disabled={!canGoForward} title="前进到下一次源码跳转" icon={<ChevronRight size={14} />} />
         </div>
         <div className="source-path">{source.path}{highlightLine ? `:${highlightLine}` : ""}</div>
         <div className="source-toolbar-actions">
-          <button type="button" onClick={onPinCurrent} title="固定当前源码片段">
-            <Pin size={14} />
-            <span>{pinnedCount || ""}</span>
-          </button>
-          <button type="button" onClick={onPinTrace} disabled={!canPinTrace} title="固定当前调用链节点">
-            <PinOff size={14} />
-          </button>
-          <button type="button" onClick={onOpenInIde} title="在 IDE 打开">
-            <ExternalLink size={14} />
-          </button>
+          <Button htmlType="button" onClick={onPinCurrent} title="固定当前源码片段" icon={<Pin size={14} />}>
+            {pinnedCount || ""}
+          </Button>
+          <Button htmlType="button" onClick={onPinTrace} disabled={!canPinTrace} title="固定当前调用链节点" icon={<PinOff size={14} />} />
+          <Button htmlType="button" onClick={onOpenInIde} title="在 IDE 打开" icon={<ExternalLink size={14} />} />
         </div>
         {openIdeStatus ? <div className="source-toolbar-status">{openIdeStatus}</div> : null}
       </div>
@@ -3043,6 +3158,31 @@ function fileLocationLabel(filePath: string, line: number) {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <ConfigProvider
+      theme={{
+        token: {
+          colorPrimary: "#245b4f",
+          colorInfo: "#245b4f",
+          borderRadius: 6,
+          fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+        },
+        components: {
+          Button: {
+            controlHeight: 30,
+            borderRadius: 6,
+          },
+          Input: {
+            controlHeight: 30,
+            borderRadius: 6,
+          },
+          Segmented: {
+            itemSelectedBg: "#eef4f2",
+            itemSelectedColor: "#245b4f",
+          },
+        },
+      }}
+    >
+      <App />
+    </ConfigProvider>
   </React.StrictMode>,
 );

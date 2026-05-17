@@ -119,6 +119,12 @@ button {
   background: transparent;
 }
 
+.root-form .root-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+}
+
 .root-form button {
   height: 24px;
   display: flex;
@@ -361,6 +367,12 @@ button {
   background: transparent;
 }
 
+.search-box .search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+}
+
 .package-node,
 .class-node {
   margin-bottom: 3px;
@@ -581,6 +593,9 @@ button {
 }
 
 .status-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-inline-end: 0;
   padding: 3px 6px;
   border: 1px solid #cfd8df;
   border-radius: 999px;
@@ -1374,6 +1389,49 @@ button {
   color: #4f5d67;
 }
 
+.ai-follow-ups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #dce3e8;
+}
+
+.ai-follow-ups > strong {
+  color: #2f404d;
+  font-size: 12px;
+}
+
+.ai-follow-ups > div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ai-follow-ups button {
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 9px;
+  border: 1px solid #cfd8df;
+  border-radius: 6px;
+  text-align: left;
+  color: #24313b;
+  background: #f8fafb;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.ai-follow-ups button:hover:not(:disabled) {
+  border-color: #245b4f;
+  background: #eef4f2;
+}
+
+.ai-follow-ups button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .ai-answer > :last-child {
   margin-bottom: 0;
 }
@@ -1444,7 +1502,14 @@ button {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-left: 12px;
+  margin-left: 12px;
+  padding: 2px;
+}
+
+.segmented-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .drawer-tabs button {
