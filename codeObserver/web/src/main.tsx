@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import {
@@ -14,6 +14,8 @@ import "@xyflow/react/dist/style.css";
 import {
   BookOpen,
   Braces,
+  ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Clipboard,
   ClipboardCheck,
@@ -27,6 +29,7 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Package as PackageIcon,
   RefreshCw,
   Route,
   Search,
@@ -54,11 +57,20 @@ type Selection = {
   line?: number;
 };
 
+type SourceNavigationEntry = Required<Selection> & {
+  label: string;
+};
+
 type BusinessTrace = {
   id: string;
   title: string;
   summary: string;
   nodeIds: string[];
+};
+
+type PackageGroup = {
+  name: string;
+  classes: ClassInfo[];
 };
 
 type GraphMode = "code" | "ai";
@@ -79,6 +91,33 @@ type MethodExplanation = {
   text: string;
 };
 
+type SourceLineExplanation = MethodExplanation & {
+  entryLine: number;
+  kind: "entry" | "body" | "call";
+  triggerText?: string;
+};
+
+type SourceLineJump = {
+  triggerText: string;
+  label: string;
+  nodeId: string;
+  filePath: string;
+  line: number;
+};
+
+type AiCacheEntry = {
+  outputMode: AiOutputMode;
+  question: string;
+  summary: string;
+  model: string;
+  context: string;
+  contextModel: string;
+  updatedAt: number;
+};
+
+const AI_CACHE_PREFIX = "codeObserver.ai.v1";
+const aiMemoryCache = new Map<string, string>();
+
 function App() {
   const [root, setRoot] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState("");
@@ -87,12 +126,16 @@ function App() {
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [source, setSource] = useState<SourceResponse | null>(null);
   const [selection, setSelection] = useState<Selection>({});
+  const [sourceHistory, setSourceHistory] = useState<SourceNavigationEntry[]>([]);
+  const [sourceHistoryIndex, setSourceHistoryIndex] = useState(-1);
   const [selectedTraceId, setSelectedTraceId] = useState("");
   const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false);
   const [activeDrawerTab, setActiveDrawerTab] = useState<DrawerTab>("source");
   const [tracePanelCollapsed, setTracePanelCollapsed] = useState(false);
   const [projectsCollapsed, setProjectsCollapsed] = useState(false);
   const [query, setQuery] = useState("");
+  const [expandedPackages, setExpandedPackages] = useState<Set<string>>(new Set());
+  const [expandedClasses, setExpandedClasses] = useState<Set<string>>(new Set());
   const [aiQuestion, setAiQuestion] = useState("");
   const [aiOutputMode, setAiOutputMode] = useState<AiOutputMode>("explain");
   const [aiSummary, setAiSummary] = useState("");
@@ -137,6 +180,10 @@ function App() {
         setAiContextLoading(false);
         setAiContextError("");
         setAiContextCopied(false);
+        setExpandedPackages(new Set());
+        setExpandedClasses(new Set());
+        setSourceHistory([]);
+        setSourceHistoryIndex(-1);
         setGraphMode("code");
         setAiGraph(null);
         setAiGraphError("");
@@ -211,11 +258,38 @@ function App() {
     });
   }, [detail, query]);
 
+  const packageGroups = useMemo<PackageGroup[]>(() => {
+    const groups = new Map<string, ClassInfo[]>();
+    filteredClasses.forEach((classInfo) => {
+      const packageName = classInfo.packageName || "(default package)";
+      groups.set(packageName, [...(groups.get(packageName) ?? []), classInfo]);
+    });
+    return [...groups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, classes]) => ({
+        name,
+        classes: [...classes].sort((left, right) => left.name.localeCompare(right.name)),
+      }));
+  }, [filteredClasses]);
+
   const businessTraces = useMemo(() => (detail ? buildBusinessTraces(detail) : []), [detail]);
   const selectedTrace = useMemo(
     () => businessTraces.find((trace) => trace.id === selectedTraceId),
     [businessTraces, selectedTraceId],
   );
+
+  const aiCacheKey = useMemo(() => {
+    if (!detail || !selectedProjectId) {
+      return "";
+    }
+    return buildAiCacheKey({
+      root: workspaceRoot || root,
+      projectId: selectedProjectId,
+      traceId: selectedTrace?.id,
+      nodeId: selectedTrace ? undefined : selection.nodeId,
+      question: aiQuestion,
+    });
+  }, [aiQuestion, detail, root, selectedProjectId, selectedTrace, selection.nodeId, workspaceRoot]);
 
   const aiSourceLinks = useMemo(() => {
     if (!detail) {
@@ -248,6 +322,32 @@ function App() {
     [detail, selectedTrace, selection.nodeId, aiSummary, aiGraph],
   );
 
+  useEffect(() => {
+    if (!aiCacheKey || aiLoading || aiContextLoading) {
+      return;
+    }
+    const cached = readAiCache(aiCacheKey);
+    if (!cached) {
+      setAiOutputMode("explain");
+      setAiSummary("");
+      setAiModel("");
+      setAiError("");
+      setAiContext("");
+      setAiContextModel("");
+      setAiContextError("");
+      setAiContextCopied(false);
+      return;
+    }
+    setAiOutputMode(cached.outputMode);
+    setAiSummary(cached.summary);
+    setAiModel(cached.model);
+    setAiError("");
+    setAiContext(cached.context);
+    setAiContextModel(cached.contextModel);
+    setAiContextError("");
+    setAiContextCopied(false);
+  }, [aiCacheKey]);
+
   const sourceTabActive = workspaceDrawerOpen && activeDrawerTab === "source";
   const aiTabActive = workspaceDrawerOpen && activeDrawerTab === "ai";
 
@@ -262,6 +362,30 @@ function App() {
       return;
     }
     openSourceDrawer();
+  }
+
+  function togglePackage(packageName: string) {
+    setExpandedPackages((current) => {
+      const next = new Set(current);
+      if (next.has(packageName)) {
+        next.delete(packageName);
+      } else {
+        next.add(packageName);
+      }
+      return next;
+    });
+  }
+
+  function toggleClass(classId: string) {
+    setExpandedClasses((current) => {
+      const next = new Set(current);
+      if (next.has(classId)) {
+        next.delete(classId);
+      } else {
+        next.add(classId);
+      }
+      return next;
+    });
   }
 
   function selectNode(
@@ -291,6 +415,60 @@ function App() {
     }
   }
 
+  function currentSourceHistoryEntry(): SourceNavigationEntry | null {
+    if (!selection.nodeId || !selection.filePath || !selection.line) {
+      return null;
+    }
+    return {
+      nodeId: selection.nodeId,
+      filePath: selection.filePath,
+      line: selection.line,
+      label: selectedNode?.label ?? "当前位置",
+    };
+  }
+
+  function sameSourceEntry(left: SourceNavigationEntry, right: SourceNavigationEntry) {
+    return left.nodeId === right.nodeId && left.filePath === right.filePath && left.line === right.line;
+  }
+
+  function jumpToSource(entry: SourceNavigationEntry) {
+    const currentEntry = currentSourceHistoryEntry();
+    setSourceHistory((history) => {
+      const base = sourceHistoryIndex >= 0
+        ? history.slice(0, sourceHistoryIndex + 1)
+        : currentEntry
+          ? [currentEntry]
+          : [];
+      const last = base[base.length - 1];
+      const nextHistory = last && sameSourceEntry(last, entry)
+        ? base
+        : [...base, entry].slice(-80);
+      setSourceHistoryIndex(nextHistory.length - 1);
+      return nextHistory;
+    });
+    selectNode(entry.nodeId, entry.filePath, entry.line, {
+      preserveAi: true,
+      preserveTrace: true,
+      preserveAiGraph: graphMode === "ai",
+    });
+    openSourceDrawer();
+  }
+
+  function moveSourceHistory(offset: -1 | 1) {
+    const nextIndex = sourceHistoryIndex + offset;
+    const entry = sourceHistory[nextIndex];
+    if (!entry) {
+      return;
+    }
+    setSourceHistoryIndex(nextIndex);
+    selectNode(entry.nodeId, entry.filePath, entry.line, {
+      preserveAi: true,
+      preserveTrace: true,
+      preserveAiGraph: graphMode === "ai",
+    });
+    openSourceDrawer();
+  }
+
   function selectTrace(trace: BusinessTrace) {
     setSelectedTraceId(trace.id);
     setAiOutputMode("explain");
@@ -314,6 +492,8 @@ function App() {
     if (!detail || !selectedProjectId) {
       return;
     }
+    const cacheKey = aiCacheKey;
+    let content = "";
     setAiOutputMode("explain");
     setAiLoading(true);
     setAiError("");
@@ -325,9 +505,23 @@ function App() {
       selectedNodeId: selection.nodeId,
       trace: selectedTrace,
       question,
-    }, (chunk) => setAiSummary((current) => current + chunk))
+    }, (chunk) => {
+      content += chunk;
+      setAiSummary((current) => current + chunk);
+    })
       .then((response) => {
         setAiModel(response.model);
+        if (cacheKey) {
+          writeAiCache(cacheKey, {
+            outputMode: "explain",
+            question,
+            summary: content.trim(),
+            model: response.model,
+            context: aiContext,
+            contextModel: aiContextModel,
+            updatedAt: Date.now(),
+          });
+        }
       })
       .catch((err: Error) => setAiError(readableError(err.message)))
       .finally(() => setAiLoading(false));
@@ -337,6 +531,8 @@ function App() {
     if (!detail || !selectedProjectId) {
       return;
     }
+    const cacheKey = aiCacheKey;
+    let content = "";
     setAiOutputMode("context");
     setAiContextLoading(true);
     setAiContextError("");
@@ -349,9 +545,23 @@ function App() {
       selectedNodeId: selection.nodeId,
       trace: selectedTrace,
       task,
-    }, (chunk) => setAiContext((current) => current + chunk))
+    }, (chunk) => {
+      content += chunk;
+      setAiContext((current) => current + chunk);
+    })
       .then((response) => {
         setAiContextModel(response.model);
+        if (cacheKey) {
+          writeAiCache(cacheKey, {
+            outputMode: "context",
+            question: task,
+            summary: aiSummary,
+            model: aiModel,
+            context: content.trim(),
+            contextModel: response.model,
+            updatedAt: Date.now(),
+          });
+        }
       })
       .catch((err: Error) => setAiContextError(readableError(err.message)))
       .finally(() => setAiContextLoading(false));
@@ -408,6 +618,9 @@ function App() {
   }
 
   function clearAiHistory() {
+    if (aiCacheKey) {
+      removeAiCache(aiCacheKey);
+    }
     setAiSummary("");
     setAiModel("");
     setAiError("");
@@ -427,20 +640,6 @@ function App() {
       window.setTimeout(() => setAiContextCopied(false), 1400);
     } catch {
       setAiContextError("复制失败，请手动选中 Context 内容复制。");
-    }
-  }
-
-  function startRecommendedReading() {
-    const firstTrace = businessTraces[0];
-    if (firstTrace) {
-      selectTrace(firstTrace);
-      openSourceDrawer();
-      return;
-    }
-    const firstStep = detail?.readingPath[0];
-    if (firstStep) {
-      selectNode(firstStep.targetNodeId, firstStep.filePath, firstStep.line);
-      openSourceDrawer();
     }
   }
 
@@ -529,11 +728,15 @@ function App() {
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索类、方法、概念" />
           </div>
           <div className="class-tree">
-            {filteredClasses.map((classInfo) => (
-              <ClassTree
-                key={classInfo.id}
-                classInfo={classInfo}
+            {packageGroups.map((group) => (
+              <PackageTree
+                key={group.name}
+                group={group}
                 selectedNodeId={selection.nodeId}
+                expandedPackages={expandedPackages}
+                expandedClasses={expandedClasses}
+                onTogglePackage={togglePackage}
+                onToggleClass={toggleClass}
                 onSelect={selectNode}
               />
             ))}
@@ -598,12 +801,7 @@ function App() {
           <ReadingGuide
             detail={detail}
             selectedTrace={selectedTrace}
-            sourceActive={sourceTabActive}
-            aiActive={aiTabActive}
             loading={loading}
-            onStart={startRecommendedReading}
-            onOpenSource={openSourceDrawer}
-            onOpenAi={() => openAiDrawer("")}
           />
           <GraphCanvas
             detail={detail}
@@ -671,6 +869,18 @@ function App() {
                   selectedNode={selectedNode}
                   detail={detail}
                   methodExplanations={aiMethodExplanations}
+                  canGoBack={sourceHistoryIndex > 0}
+                  canGoForward={sourceHistoryIndex >= 0 && sourceHistoryIndex < sourceHistory.length - 1}
+                  onBack={() => moveSourceHistory(-1)}
+                  onForward={() => moveSourceHistory(1)}
+                  onJump={(jump) => {
+                    jumpToSource({
+                      nodeId: jump.nodeId,
+                      filePath: jump.filePath,
+                      line: jump.line,
+                      label: jump.label,
+                    });
+                  }}
                 />
               </div>
             ) : (
@@ -695,8 +905,12 @@ function App() {
                   onCopyContext={copyAiContext}
                   onClearHistory={clearAiHistory}
                   onOpenSource={(link) => {
-                    selectNode(link.id, link.filePath, link.line, { preserveAi: true, preserveTrace: true, preserveAiGraph: graphMode === "ai" });
-                    openSourceDrawer();
+                    jumpToSource({
+                      nodeId: link.id,
+                      filePath: link.filePath,
+                      line: link.line,
+                      label: link.label,
+                    });
                   }}
                 />
               </div>
@@ -733,21 +947,11 @@ function Concepts({ concepts }: { concepts: string[] }) {
 function ReadingGuide({
   detail,
   selectedTrace,
-  sourceActive,
-  aiActive,
   loading,
-  onStart,
-  onOpenSource,
-  onOpenAi,
 }: {
   detail: ProjectDetail | null;
   selectedTrace?: BusinessTrace;
-  sourceActive: boolean;
-  aiActive: boolean;
   loading: boolean;
-  onStart: () => void;
-  onOpenSource: () => void;
-  onOpenAi: () => void;
 }) {
   const projectLabel = detail
     ? `${detail.summary.classCount} 个类型 · ${detail.summary.methodCount} 个方法 · ${detail.summary.entryPoints.length} 个入口`
@@ -760,53 +964,80 @@ function ReadingGuide({
         <strong>{selectedTrace ? `推荐从 ${selectedTrace.title} 开始` : "先沿推荐入口读一遍主流程"}</strong>
         <span>{selectedTrace?.summary ?? projectLabel}</span>
       </div>
-      <div className="guide-actions">
-        <button type="button" onClick={onStart} disabled={!detail} title="选中推荐链路并打开源码">
-          开始阅读
-        </button>
-        <button type="button" onClick={onOpenSource} disabled={!detail} title="打开源码面板">
-          {sourceActive ? "源码已打开" : "看源码"}
-        </button>
-        <button type="button" onClick={onOpenAi} disabled={!detail || loading} title="解释当前链路">
-          {aiActive ? "AI 已打开" : "让 AI 解释"}
-        </button>
-      </div>
     </section>
   );
 }
 
-function ClassTree({
-  classInfo,
+function PackageTree({
+  group,
   selectedNodeId,
+  expandedPackages,
+  expandedClasses,
+  onTogglePackage,
+  onToggleClass,
   onSelect,
 }: {
-  classInfo: ClassInfo;
+  group: PackageGroup;
   selectedNodeId?: string;
+  expandedPackages: Set<string>;
+  expandedClasses: Set<string>;
+  onTogglePackage: (packageName: string) => void;
+  onToggleClass: (classId: string) => void;
   onSelect: (nodeId: string, filePath: string, line: number) => void;
 }) {
+  const packageExpanded = expandedPackages.has(group.name);
   return (
-    <div className="class-node">
+    <div className="package-node">
       <button
-        className={`tree-row class-row ${selectedNodeId === classInfo.id ? "active" : ""}`}
-        onClick={() => onSelect(classInfo.id, classInfo.filePath, classInfo.beginLine)}
+        className={`tree-row package-row ${packageExpanded ? "expanded" : ""}`}
+        onClick={() => onTogglePackage(group.name)}
+        title={packageExpanded ? "折叠包" : "展开包"}
       >
-        <Braces size={14} />
-        <span>{classInfo.name}</span>
-        <small>{localizedKind(classInfo.kind)}</small>
+        {packageExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <span>{group.name}</span>
+        <small>{group.classes.length} 个类型</small>
       </button>
-      <div className="method-list">
-        {classInfo.methods.map((method) => (
-          <button
-            key={method.id}
-            className={`tree-row method-row ${selectedNodeId === method.id ? "active" : ""}`}
-            onClick={() => onSelect(method.id, classInfo.filePath, method.beginLine)}
-          >
-            <ChevronRight size={13} />
-            <span>{method.name}</span>
-            <small>{method.calls.length ? `${method.calls.length} 次调用` : method.returnType}</small>
-          </button>
-        ))}
-      </div>
+      {packageExpanded ? (
+        <div className="class-list">
+          {group.classes.map((classInfo) => {
+            const classExpanded = expandedClasses.has(classInfo.id);
+            return (
+              <div className="class-node" key={classInfo.id}>
+                <button
+                  className={`tree-row class-row ${selectedNodeId === classInfo.id ? "active" : ""} ${classExpanded ? "expanded" : ""}`}
+                  onClick={() => {
+                    onSelect(classInfo.id, classInfo.filePath, classInfo.beginLine);
+                    onToggleClass(classInfo.id);
+                  }}
+                  title={classExpanded ? "折叠类型" : "展开类型"}
+                >
+                  {classExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <span>
+                    <Braces size={13} />
+                    {classInfo.name}
+                  </span>
+                  <small>{localizedKind(classInfo.kind)}</small>
+                </button>
+                {classExpanded ? (
+                  <div className="method-list">
+                    {classInfo.methods.map((method) => (
+                      <button
+                        key={method.id}
+                        className={`tree-row method-row ${selectedNodeId === method.id ? "active" : ""}`}
+                        onClick={() => onSelect(method.id, classInfo.filePath, method.beginLine)}
+                      >
+                        <ChevronRight size={13} />
+                        <span>{method.name}</span>
+                        <small>{method.calls.length ? `${method.calls.length} 次调用` : method.returnType}</small>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1248,6 +1479,78 @@ function ownerClassName(detail: ProjectDetail, methodId: string) {
   return owner?.name ?? "";
 }
 
+function buildAiCacheKey({
+  root,
+  projectId,
+  traceId,
+  nodeId,
+  question,
+}: {
+  root: string;
+  projectId: string;
+  traceId?: string;
+  nodeId?: string;
+  question: string;
+}) {
+  const target = traceId ? `trace:${traceId}` : `node:${nodeId ?? "project"}`;
+  const normalizedQuestion = question.trim() || "__default__";
+  return [
+    AI_CACHE_PREFIX,
+    encodeURIComponent(root || "default-root"),
+    encodeURIComponent(projectId),
+    encodeURIComponent(target),
+    encodeURIComponent(normalizedQuestion),
+  ].join(":");
+}
+
+function readAiCache(key: string): AiCacheEntry | null {
+  try {
+    const raw = browserLocalStorage()?.getItem(key) ?? aiMemoryCache.get(key);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<AiCacheEntry>;
+    return {
+      outputMode: parsed.outputMode === "context" ? "context" : "explain",
+      question: parsed.question ?? "",
+      summary: parsed.summary ?? "",
+      model: parsed.model ?? "",
+      context: parsed.context ?? "",
+      contextModel: parsed.contextModel ?? "",
+      updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeAiCache(key: string, entry: AiCacheEntry) {
+  const value = JSON.stringify(entry);
+  aiMemoryCache.set(key, value);
+  try {
+    browserLocalStorage()?.setItem(key, value);
+  } catch {
+    // Best-effort cache only; generation should not fail if the browser refuses storage.
+  }
+}
+
+function removeAiCache(key: string) {
+  aiMemoryCache.delete(key);
+  try {
+    browserLocalStorage()?.removeItem(key);
+  } catch {
+    // Best-effort cache only.
+  }
+}
+
+function browserLocalStorage() {
+  try {
+    return typeof window !== "undefined" && window.localStorage ? window.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildAiMethodExplanations(
   detail: ProjectDetail | null,
   selectedTrace: BusinessTrace | undefined,
@@ -1259,12 +1562,16 @@ function buildAiMethodExplanations(
   if (!detail || !summary.trim()) {
     return explanations;
   }
-  const nodeIds = selectedTrace?.nodeIds.length
+  const primaryNodeIds = selectedTrace?.nodeIds.length
     ? selectedTrace.nodeIds
     : selectedNodeId
       ? [selectedNodeId]
       : [];
-  nodeIds.forEach((nodeId, index) => {
+  const nodeIds = new Set([
+    ...primaryNodeIds,
+    ...(aiGraph?.nodes.map((node) => node.id) ?? []),
+  ]);
+  [...nodeIds].forEach((nodeId, index) => {
     const node = detail.graphNodes.find((candidate) => candidate.id === nodeId && candidate.type === "method");
     const method = node ? methodById(detail, node.id) : undefined;
     const owner = node ? ownerClassName(detail, node.id) : "";
@@ -1282,6 +1589,22 @@ function buildAiMethodExplanations(
       });
     }
   });
+  detail.graphNodes
+    .filter((node) => node.type === "method" && !explanations.has(node.id))
+    .forEach((node) => {
+      const method = methodById(detail, node.id);
+      const owner = ownerClassName(detail, node.id);
+      if (!method) {
+        return;
+      }
+      const extracted = extractMethodExplanation(summary, owner, method);
+      if (extracted) {
+        explanations.set(node.id, {
+          label: owner ? `${owner}.${method.name}` : method.name,
+          text: extracted,
+        });
+      }
+    });
   return explanations;
 }
 
@@ -1313,6 +1636,14 @@ function extractMethodExplanation(summary: string, owner: string, method: Method
 function compactExplanation(value: string) {
   const text = value.replace(/\s+/g, " ").trim();
   return text.length > 360 ? `${text.slice(0, 356)}...` : text;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function lineCallsMethod(line: string, methodName: string) {
+  return new RegExp(`(^|[^A-Za-z0-9_$])${escapeRegExp(methodName)}\\s*\\(`).test(line);
 }
 
 function TraceExplorer({
@@ -1610,13 +1941,24 @@ function SourceViewer({
   selectedNode,
   detail,
   methodExplanations,
+  canGoBack,
+  canGoForward,
+  onBack,
+  onForward,
+  onJump,
 }: {
   source: SourceResponse | null;
   highlightLine?: number;
   selectedNode?: GraphNode;
   detail: ProjectDetail | null;
   methodExplanations: Map<string, MethodExplanation>;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  onBack: () => void;
+  onForward: () => void;
+  onJump: (jump: SourceLineJump) => void;
 }) {
+  const sourcePreRef = useRef<HTMLPreElement | null>(null);
   const lines = useMemo(() => source?.content.split("\n") ?? [], [source]);
   const activeRange = useMemo(() => {
     if (!selectedNode || !detail) {
@@ -1632,57 +1974,206 @@ function SourceViewer({
       : { begin: owner.beginLine, end: owner.endLine };
   }, [detail, selectedNode]);
   const lineExplanations = useMemo(() => {
-    const annotations = new Map<number, MethodExplanation & { entryLine: number }>();
+    const annotations = new Map<number, SourceLineExplanation>();
     if (!source || !detail || !methodExplanations.size) {
       return annotations;
     }
-    detail.classes
-      .filter((classInfo) => classInfo.filePath === source.path)
-      .forEach((classInfo) => {
-        classInfo.methods.forEach((method) => {
-          const explanation = methodExplanations.get(method.id);
-          if (!explanation) {
-            return;
-          }
+    const fileClasses = detail.classes.filter((classInfo) => classInfo.filePath === source.path);
+    const explainedMethods = detail.classes.flatMap((classInfo) => classInfo.methods
+      .map((method) => ({
+        method,
+        owner: classInfo.name,
+        explanation: methodExplanations.get(method.id),
+      }))
+      .filter((item): item is { method: MethodInfo; owner: string; explanation: MethodExplanation } => Boolean(item.explanation)));
+    fileClasses.forEach((classInfo) => {
+      classInfo.methods.forEach((method) => {
+        const explanation = methodExplanations.get(method.id);
+        if (explanation) {
           for (let lineNo = method.beginLine; lineNo <= method.endLine; lineNo += 1) {
-            annotations.set(lineNo, { ...explanation, entryLine: method.beginLine });
+            annotations.set(lineNo, {
+              ...explanation,
+              entryLine: method.beginLine,
+              kind: lineNo === method.beginLine ? "entry" : "body",
+              triggerText: lineNo === method.beginLine ? method.name : undefined,
+            });
           }
+        }
+        explainedMethods
+          .filter((target) => target.method.id !== method.id)
+          .forEach((target) => {
+            for (let lineNo = method.beginLine + 1; lineNo <= method.endLine; lineNo += 1) {
+              const line = lines[lineNo - 1] ?? "";
+              if (!lineCallsMethod(line, target.method.name)) {
+                continue;
+              }
+              annotations.set(lineNo, {
+                label: `调用 ${target.owner}.${target.method.name}`,
+                text: target.explanation.text,
+                entryLine: lineNo,
+                kind: "call",
+                triggerText: target.method.name,
+              });
+            }
+          });
         });
-      });
+    });
     return annotations;
-  }, [detail, methodExplanations, source]);
+  }, [detail, lines, methodExplanations, source]);
+  const lineJumps = useMemo(() => buildSourceLineJumps(source, detail, lines), [detail, lines, source]);
+  useEffect(() => {
+    if (!highlightLine || !sourcePreRef.current) {
+      return;
+    }
+    const target = sourcePreRef.current.querySelector<HTMLElement>(`[data-line="${highlightLine}"]`);
+    target?.scrollIntoView({ block: "center", inline: "nearest" });
+  }, [highlightLine, source?.path]);
   if (!source) {
     return <div className="source-empty">还没有选择源码文件。</div>;
   }
   return (
     <div className="source-view">
-      <div className="source-path">{source.path}</div>
-      <pre>
+      <div className="source-toolbar">
+        <div className="source-nav-actions" aria-label="源码跳转历史">
+          <button type="button" onClick={onBack} disabled={!canGoBack} title="后退到上一次源码跳转">
+            <ChevronLeft size={14} />
+          </button>
+          <button type="button" onClick={onForward} disabled={!canGoForward} title="前进到下一次源码跳转">
+            <ChevronRight size={14} />
+          </button>
+        </div>
+        <div className="source-path">{source.path}{highlightLine ? `:${highlightLine}` : ""}</div>
+      </div>
+      <pre ref={sourcePreRef}>
         {lines.map((line, index) => {
           const lineNo = index + 1;
           const inRange = activeRange ? lineNo >= activeRange.begin && lineNo <= activeRange.end : false;
           const explanation = lineExplanations.get(lineNo);
+          const jump = lineJumps.get(lineNo);
           return (
             <div
               key={lineNo}
+              data-line={lineNo}
               className={`code-line ${inRange ? "in-range" : ""} ${lineNo === highlightLine ? "highlight" : ""} ${explanation ? "has-ai-explanation" : ""}`}
             >
               <span className="line-no">{lineNo}</span>
-              <code>{line || " "}</code>
               {explanation ? (
-                <span className={`ai-source-note ${lineNo === explanation.entryLine ? "entry" : ""}`}>
-                  <span className="ai-source-badge">AI</span>
+                <span className={`ai-source-note ${explanation.kind}`}>
+                  <span className="ai-source-badge">{explanation.kind === "call" ? "CALL" : "AI"}</span>
                   <span className="source-tooltip" role="tooltip">
                     <strong>{explanation.label}</strong>
                     <span>{explanation.text}</span>
                   </span>
                 </span>
-              ) : null}
+              ) : <span className="ai-source-note-spacer" />}
+              <code>
+                <CodeLineContent line={line} explanation={explanation} jump={jump} onJump={onJump} />
+              </code>
             </div>
           );
         })}
       </pre>
     </div>
+  );
+}
+
+function buildSourceLineJumps(source: SourceResponse | null, detail: ProjectDetail | null, lines: string[]) {
+  const jumps = new Map<number, SourceLineJump>();
+  if (!source || !detail) {
+    return jumps;
+  }
+  const nodesById = new Map(detail.graphNodes.map((node) => [node.id, node]));
+  const fileClasses = detail.classes.filter((classInfo) => classInfo.filePath === source.path);
+  fileClasses.forEach((classInfo) => {
+    jumps.set(classInfo.beginLine, {
+      triggerText: classInfo.name,
+      label: `跳转到类 ${classInfo.name}`,
+      nodeId: classInfo.id,
+      filePath: classInfo.filePath,
+      line: classInfo.beginLine,
+    });
+    classInfo.methods.forEach((method) => {
+      jumps.set(method.beginLine, {
+        triggerText: method.name,
+        label: `跳转到方法 ${classInfo.name}.${method.name}`,
+        nodeId: method.id,
+        filePath: classInfo.filePath,
+        line: method.beginLine,
+      });
+      detail.graphEdges
+        .filter((edge) => edge.type === "CALLS" && edge.source === method.id)
+        .forEach((edge) => {
+          const target = nodesById.get(edge.target);
+          if (!target || target.type !== "method") {
+            return;
+          }
+          for (let lineNo = method.beginLine + 1; lineNo <= method.endLine; lineNo += 1) {
+            const line = lines[lineNo - 1] ?? "";
+            if (!lineCallsMethod(line, target.label)) {
+              continue;
+            }
+            jumps.set(lineNo, {
+              triggerText: target.label,
+              label: `跳转到 ${ownerClassName(detail, target.id) ? `${ownerClassName(detail, target.id)}.` : ""}${target.label}`,
+              nodeId: target.id,
+              filePath: target.filePath,
+              line: target.line,
+            });
+            break;
+          }
+        });
+    });
+  });
+  return jumps;
+}
+
+function CodeLineContent({
+  line,
+  explanation,
+  jump,
+  onJump,
+}: {
+  line: string;
+  explanation?: SourceLineExplanation;
+  jump?: SourceLineJump;
+  onJump: (jump: SourceLineJump) => void;
+}) {
+  const triggerText = explanation?.triggerText ?? jump?.triggerText;
+  const code = line || " ";
+  if (!triggerText) {
+    return <>{code}</>;
+  }
+  const index = line.indexOf(triggerText);
+  if (index < 0) {
+    return <>{code}</>;
+  }
+  const before = line.slice(0, index);
+  const after = line.slice(index + triggerText.length);
+  const title = [jump?.label, explanation ? "hover 查看 AI 解释" : ""].filter(Boolean).join(" · ");
+  return (
+    <>
+      {before}
+      <button
+        className={`source-code-trigger ${jump ? "jumpable" : ""}`}
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          if (jump) {
+            onJump(jump);
+          }
+        }}
+        title={title || undefined}
+      >
+        {triggerText}
+        {explanation ? (
+          <span className="source-tooltip code-tooltip" role="tooltip">
+            <strong>{explanation.label}</strong>
+            <span>{explanation.text}</span>
+          </span>
+        ) : null}
+      </button>
+      {after}
+    </>
   );
 }
 

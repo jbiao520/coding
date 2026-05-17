@@ -1,4 +1,6 @@
 :root {
+  --topbar-height: 76px;
+  --trace-panel-height: clamp(150px, 28dvh, 260px);
   color-scheme: light;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -11,6 +13,12 @@
 
 * {
   box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
 }
 
 body {
@@ -30,12 +38,16 @@ button {
 
 .app-shell {
   height: 100vh;
-  display: grid;
-  grid-template-rows: auto auto 1fr;
+  height: 100dvh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .topbar {
-  height: 76px;
+  flex: 0 0 var(--topbar-height);
+  height: var(--topbar-height);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -119,6 +131,7 @@ button {
 }
 
 .error-bar {
+  flex: 0 0 auto;
   padding: 8px 18px;
   color: #7a271a;
   border-bottom: 1px solid #f0b8ad;
@@ -127,6 +140,7 @@ button {
 
 .workspace-grid {
   position: relative;
+  flex: 1 1 auto;
   min-height: 0;
   display: grid;
   grid-template-columns: 280px 330px minmax(640px, 1fr);
@@ -212,7 +226,7 @@ button {
 
 .center-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) 260px;
+  grid-template-rows: auto auto minmax(0, 1fr) var(--trace-panel-height);
   overflow: hidden;
 }
 
@@ -310,6 +324,7 @@ button {
   background: transparent;
 }
 
+.package-node,
 .class-node {
   margin-bottom: 7px;
 }
@@ -330,6 +345,10 @@ button {
 }
 
 .tree-row span {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -348,6 +367,19 @@ button {
 
 .class-row {
   font-weight: 700;
+}
+
+.package-row {
+  font-weight: 750;
+  color: #1f332e;
+}
+
+.package-row small {
+  font-weight: 600;
+}
+
+.class-list {
+  padding-left: 14px;
 }
 
 .method-list {
@@ -418,35 +450,6 @@ button {
   color: #586873;
   font-size: 12px;
   line-height: 1.35;
-}
-
-.guide-actions {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.guide-actions button {
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid #cfd8df;
-  border-radius: 6px;
-  color: #2f404d;
-  background: #ffffff;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.guide-actions button:first-child {
-  color: #ffffff;
-  border-color: #245b4f;
-  background: #245b4f;
-}
-
-.guide-actions button:disabled {
-  cursor: not-allowed;
-  opacity: 0.58;
 }
 
 .source-toggle,
@@ -1169,9 +1172,10 @@ button {
 .side-drawer {
   position: fixed;
   z-index: 20;
-  top: 76px;
+  top: var(--topbar-height);
   right: 0;
-  height: calc(100vh - 76px);
+  height: calc(100vh - var(--topbar-height));
+  height: calc(100dvh - var(--topbar-height));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1183,7 +1187,8 @@ button {
 }
 
 .workspace-drawer {
-  width: clamp(560px, 58vw, 860px);
+  width: 50vw;
+  max-width: calc(100% - 52px);
 }
 
 .side-drawer.open {
@@ -1269,16 +1274,51 @@ button {
   background: #10171d;
 }
 
-.source-path {
+.source-toolbar {
   flex: 0 0 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 8px 12px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
   color: #c8d3db;
   border-top: 1px solid #22313a;
   border-bottom: 1px solid #22313a;
   background: #18232b;
+}
+
+.source-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.source-nav-actions button {
+  width: 26px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #31424d;
+  border-radius: 6px;
+  color: #d8e2e8;
+  background: #10171d;
+}
+
+.source-nav-actions button:hover:not(:disabled) {
+  border-color: #7eb7a4;
+  background: #24342f;
+}
+
+.source-nav-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.source-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #c8d3db;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
 }
@@ -1298,7 +1338,8 @@ button {
 .code-line {
   position: relative;
   display: grid;
-  grid-template-columns: 52px minmax(max-content, 1fr);
+  grid-template-columns: 52px 48px minmax(max-content, 1fr);
+  align-items: start;
   min-height: 19px;
   padding-right: 18px;
 }
@@ -1315,21 +1356,17 @@ button {
   box-shadow: inset 2px 0 0 #7eb7a4;
 }
 
-.code-line.has-ai-explanation:hover {
-  background: #24342f;
-}
-
 .ai-source-note {
-  position: absolute;
-  top: 50%;
-  right: 10px;
-  z-index: 6;
-  transform: translateY(-50%);
+  position: relative;
+  z-index: 12;
+  display: flex;
+  justify-content: center;
+  padding-top: 1px;
   user-select: none;
 }
 
 .ai-source-badge {
-  display: none;
+  display: inline-flex;
   align-items: center;
   height: 18px;
   padding: 0 5px;
@@ -1343,14 +1380,26 @@ button {
   line-height: 1;
 }
 
-.ai-source-note.entry .ai-source-badge {
-  display: inline-flex;
+.ai-source-note.body .ai-source-badge {
+  width: 6px;
+  padding: 0;
+  overflow: hidden;
+  color: transparent;
+  border-color: #7eb7a4;
+  background: #7eb7a4;
+}
+
+.ai-source-note.call .ai-source-badge {
+  color: #dcecff;
+  border-color: #89b7e6;
+  background: #315d86;
 }
 
 .source-tooltip {
   position: absolute;
-  top: 24px;
-  right: 0;
+  top: 23px;
+  left: 42px;
+  z-index: 80;
   width: min(360px, 42vw);
   display: none;
   flex-direction: column;
@@ -1367,13 +1416,51 @@ button {
   white-space: normal;
 }
 
+.source-code-trigger {
+  position: relative;
+  display: inline-block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: #dff7ed;
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: #7eb7a4;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  cursor: help;
+}
+
+.source-code-trigger.jumpable {
+  color: #d8e9ff;
+  text-decoration-color: #89b7e6;
+  cursor: pointer;
+}
+
+.source-code-trigger:hover {
+  color: #ffffff;
+}
+
+.source-code-trigger .code-tooltip {
+  top: 22px;
+  left: 0;
+}
+
+.ai-source-note-spacer {
+  min-width: 0;
+}
+
 .source-tooltip strong {
   color: #245b4f;
   font-size: 12px;
 }
 
-.code-line.has-ai-explanation:hover .source-tooltip,
-.ai-source-note:focus-within .source-tooltip {
+.ai-source-note:hover .source-tooltip,
+.ai-source-note:focus-within .source-tooltip,
+.line-no:hover + .ai-source-note .source-tooltip,
+.source-code-trigger:hover .source-tooltip,
+.source-code-trigger:focus-within .source-tooltip {
   display: flex;
 }
 

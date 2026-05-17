@@ -44,6 +44,10 @@ import reactor.core.publisher.Flux;
 public class AiSummaryService {
     private static final int MAX_SNIPPET_LINES = 90;
     private static final int MAX_AI_GRAPH_NODES = 8;
+    private static final int MAX_CONTEXT_SYMBOLS = 14;
+    private static final int MAX_CONTEXT_CLASS_METHODS = 8;
+    private static final int MAX_CONTEXT_DIRECT_EDGES = 32;
+    private static final int MAX_CONTEXT_SNIPPETS = 6;
 
     private final WorkspaceService workspaceService;
     private final LearningFlowAiProperties properties;
@@ -280,6 +284,8 @@ public class AiSummaryService {
                 ## Direct Call Facts
                 ## Source Snippet Facts
                 每条内容都必须能对应到输入中的项目元数据、调用链、符号元数据、直接调用边或源码片段。
+                Symbol Facts 只展开输入中列出的符号；accessor-like 方法若出现在压缩访问器事实里，只能合并描述，不要逐个扩展成完整符号。
+                Direct Call Facts 只整理输入中“直接调用边事实”列出的边；不要从源码片段自行补边。
                 不要输出“建议、应该、最好、风险、可能、关键、重要、优先、注意、需要”这类判断性或指导性表述。
                 如果某个小节没有输入事实，就写“未提供”。
                 """;
@@ -412,6 +418,8 @@ public class AiSummaryService {
                 prompt.append(index++).append(". ").append(describeNode(detail, nodeId)).append('\n');
             }
             prompt.append('\n');
+        } else {
+            prompt.append("当前用户选中的调用链：未提供\n\n");
         }
 
         if (request.selectedNodeId() != null && !request.selectedNodeId().isBlank()) {
@@ -445,17 +453,30 @@ public class AiSummaryService {
         }
         prompt.append('\n');
 
-        prompt.append("这些符号之间的直接调用边：\n");
-        detail.graphEdges().stream()
-                .filter(edge -> "CALLS".equals(edge.type()))
-                .filter(edge -> contextNodeIdSet.contains(edge.source()) && contextNodeIdSet.contains(edge.target()))
-                .sorted(Comparator.comparing(GraphEdge::source).thenComparing(GraphEdge::target))
-                .forEach(edge -> prompt.append("- ")
-                        .append(edge.source()).append(" -> ").append(edge.target())
-                        .append(" | ").append(edge.label()).append('\n'));
+        List<String> accessorFacts = compressedAccessorFacts(detail, request, contextNodeIdSet);
+        prompt.append("压缩访问器事实（不要在 Symbol Facts 中逐个展开这些方法）：\n");
+        if (accessorFacts.isEmpty()) {
+            prompt.append("- none\n");
+        } else {
+            accessorFacts.forEach(fact -> prompt.append("- ").append(fact).append('\n'));
+        }
         prompt.append('\n');
 
-        List<String> snippets = relevantSnippets(detail, request.selectedNodeId(), request.trace());
+        prompt.append("直接调用边事实（source 属于符号事实；target 是源码分析解析到的调用目标）：\n");
+        List<GraphEdge> directEdges = codingContextDirectEdges(detail, contextNodeIdSet);
+        if (directEdges.isEmpty()) {
+            prompt.append("- none\n");
+        } else {
+            directEdges.forEach(edge -> prompt.append("- ")
+                    .append(edge.source()).append(" -> ").append(edge.target())
+                    .append(" | ").append(edge.label()).append('\n'));
+        }
+        prompt.append('\n');
+
+        prompt.append("符号事实范围说明：Symbol Facts 来自选中调用链、当前选中节点、当前选中类的非 accessor 方法或当前选中方法的一跳调用关系。\n");
+        prompt.append('\n');
+
+        List<String> snippets = relevantCodingSnippets(detail, request.selectedNodeId(), request.trace(), contextNodeIds);
         if (!snippets.isEmpty()) {
             prompt.append("源码片段事实（最终 context 只能摘录或改写这些已给出的事实，不要大段复制源码）：\n");
             for (String snippet : snippets) {
@@ -469,7 +490,8 @@ public class AiSummaryService {
                 2. 不判断哪些文件或方法更重要，不给实现方案，不给测试建议，不写风险或缺口。
                 3. 不推断未明示的状态变化；只有源码片段或元数据中直接出现的字段、返回值、调用、创建关系才可以写。
                 4. 不使用“建议、应该、最好、风险、可能、关键、重要、优先、注意、需要”等判断性或指导性词。
-                5. 输出要短，避免把源码逐行搬运过去。
+                5. 如果没有选中调用链，Selected Call Chain Facts 只能写“未提供”，不要把 Symbol Facts 改写成调用链。
+                6. 输出要短，避免把源码逐行搬运过去。
                 """);
         return prompt.toString();
     }
@@ -537,13 +559,16 @@ public class AiSummaryService {
 
     private List<String> codingContextNodeIds(ProjectDetail detail, AiCodingContextRequest request) {
         Set<String> nodeIds = new LinkedHashSet<>();
+        Set<String> explicitNodeIds = new LinkedHashSet<>();
         FlowTrace trace = request.trace();
         if (trace != null && trace.nodeIds() != null && !trace.nodeIds().isEmpty()) {
+            explicitNodeIds.addAll(trace.nodeIds());
             nodeIds.addAll(trace.nodeIds());
         }
         if (request.selectedNodeId() != null && !request.selectedNodeId().isBlank()) {
+            explicitNodeIds.add(request.selectedNodeId());
             nodeIds.add(request.selectedNodeId());
-            addNeighborhood(detail, request.selectedNodeId(), nodeIds);
+            addCodingNeighborhood(detail, request.selectedNodeId(), nodeIds);
         }
         if (nodeIds.isEmpty()) {
             detail.readingPath().stream()
@@ -560,8 +585,42 @@ public class AiSummaryService {
         }
         return nodeIds.stream()
                 .filter(nodeId -> detail.graphNodes().stream().anyMatch(node -> node.id().equals(nodeId)))
-                .limit(18)
+                .filter(nodeId -> explicitNodeIds.contains(nodeId)
+                        || isClassNode(detail, nodeId)
+                        || !isAccessorLikeMethod(detail, nodeId))
+                .limit(MAX_CONTEXT_SYMBOLS)
                 .toList();
+    }
+
+    private void addCodingNeighborhood(ProjectDetail detail, String selectedNodeId, Set<String> nodeIds) {
+        Optional<GraphNode> selected = detail.graphNodes().stream()
+                .filter(node -> node.id().equals(selectedNodeId))
+                .findFirst();
+        if (selected.isPresent() && "class".equals(selected.get().type())) {
+            detail.classes().stream()
+                    .filter(classInfo -> classInfo.id().equals(selectedNodeId))
+                    .findFirst()
+                    .ifPresent(classInfo -> classInfo.methods().stream()
+                            .filter(method -> !isAccessorLikeMethod(method))
+                            .limit(MAX_CONTEXT_CLASS_METHODS)
+                            .map(MethodInfo::id)
+                            .forEach(nodeIds::add));
+            return;
+        }
+        detail.graphEdges().stream()
+                .filter(edge -> "CALLS".equals(edge.type()))
+                .filter(edge -> edge.source().equals(selectedNodeId) || edge.target().equals(selectedNodeId))
+                .sorted(Comparator.comparing(GraphEdge::source).thenComparing(GraphEdge::target))
+                .limit(12)
+                .forEach(edge -> {
+                    nodeIds.add(edge.source());
+                    nodeIds.add(edge.target());
+                });
+    }
+
+    private boolean isClassNode(ProjectDetail detail, String nodeId) {
+        return detail.graphNodes().stream()
+                .anyMatch(node -> node.id().equals(nodeId) && "class".equals(node.type()));
     }
 
     private void addNeighborhood(ProjectDetail detail, String selectedNodeId, Set<String> nodeIds) {
@@ -605,6 +664,99 @@ public class AiSummaryService {
             }
         }
         return snippets;
+    }
+
+    private List<String> relevantCodingSnippets(
+            ProjectDetail detail,
+            String selectedNodeId,
+            FlowTrace trace,
+            List<String> contextNodeIds
+    ) {
+        Set<String> explicitNodeIds = new LinkedHashSet<>();
+        if (trace != null && trace.nodeIds() != null) {
+            explicitNodeIds.addAll(trace.nodeIds());
+        }
+        if (selectedNodeId != null && !selectedNodeId.isBlank()) {
+            explicitNodeIds.add(selectedNodeId);
+        }
+
+        Set<String> nodeIds = new LinkedHashSet<>(explicitNodeIds);
+        for (String nodeId : contextNodeIds) {
+            if (nodeIds.size() >= MAX_CONTEXT_SNIPPETS) {
+                break;
+            }
+            if (explicitNodeIds.contains(nodeId) || isClassNode(detail, nodeId) || !isAccessorLikeMethod(detail, nodeId)) {
+                nodeIds.add(nodeId);
+            }
+        }
+
+        List<String> snippets = new ArrayList<>();
+        for (String nodeId : nodeIds) {
+            findCodingSnippet(detail, nodeId).ifPresent(snippets::add);
+            if (snippets.size() >= MAX_CONTEXT_SNIPPETS) {
+                break;
+            }
+        }
+        return snippets;
+    }
+
+    private List<GraphEdge> codingContextDirectEdges(ProjectDetail detail, Set<String> contextNodeIdSet) {
+        return detail.graphEdges().stream()
+                .filter(edge -> "CALLS".equals(edge.type()))
+                .filter(edge -> contextNodeIdSet.contains(edge.source()))
+                .sorted(Comparator.comparing(GraphEdge::source).thenComparing(GraphEdge::target))
+                .limit(MAX_CONTEXT_DIRECT_EDGES)
+                .toList();
+    }
+
+    private List<String> compressedAccessorFacts(
+            ProjectDetail detail,
+            AiCodingContextRequest request,
+            Set<String> contextNodeIdSet
+    ) {
+        Set<String> accessorIds = new LinkedHashSet<>();
+        String selectedNodeId = request.selectedNodeId();
+        if (selectedNodeId != null && !selectedNodeId.isBlank() && isClassNode(detail, selectedNodeId)) {
+            detail.classes().stream()
+                    .filter(classInfo -> classInfo.id().equals(selectedNodeId))
+                    .findFirst()
+                    .ifPresent(classInfo -> classInfo.methods().stream()
+                            .filter(this::isAccessorLikeMethod)
+                            .map(MethodInfo::id)
+                            .filter(methodId -> !contextNodeIdSet.contains(methodId))
+                            .forEach(accessorIds::add));
+        }
+
+        detail.graphEdges().stream()
+                .filter(edge -> "CALLS".equals(edge.type()))
+                .filter(edge -> contextNodeIdSet.contains(edge.source()))
+                .map(GraphEdge::target)
+                .filter(target -> !contextNodeIdSet.contains(target))
+                .filter(target -> isAccessorLikeMethod(detail, target))
+                .forEach(accessorIds::add);
+
+        return accessorIds.stream()
+                .map(accessorId -> accessorFact(detail, accessorId))
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .limit(12)
+                .toList();
+    }
+
+    private Optional<String> accessorFact(ProjectDetail detail, String methodId) {
+        for (ClassInfo classInfo : detail.classes()) {
+            Optional<MethodInfo> method = classInfo.methods().stream()
+                    .filter(item -> item.id().equals(methodId))
+                    .findFirst();
+            if (method.isPresent()) {
+                MethodInfo item = method.get();
+                return Optional.of(classInfo.name() + "." + item.signature()
+                        + " -> " + item.returnType()
+                        + " @ " + Path.of(classInfo.filePath()).getFileName()
+                        + ":" + item.beginLine());
+            }
+        }
+        return Optional.empty();
     }
 
     private AiCallGraphResponse parseCallGraphResponse(String content) {
@@ -800,8 +952,48 @@ public class AiSummaryService {
         return Optional.empty();
     }
 
+    private boolean isAccessorLikeMethod(ProjectDetail detail, String nodeId) {
+        return findMethod(detail, nodeId)
+                .map(this::isAccessorLikeMethod)
+                .orElse(false);
+    }
+
+    private boolean isAccessorLikeMethod(MethodInfo method) {
+        String name = method.name().toLowerCase();
+        Set<String> commonAccessors = Set.of(
+                "id",
+                "role",
+                "leaderid",
+                "currentterm",
+                "commitindex",
+                "lastlogindex",
+                "lastlogterm",
+                "linkkey",
+                "snapshot",
+                "statesnapshot",
+                "logsummary"
+        );
+        return method.calls().isEmpty()
+                && !"void".equals(method.returnType())
+                && (commonAccessors.contains(name) || name.startsWith("get") || name.startsWith("is"));
+    }
+
     private String defaultIfBlank(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value.trim();
+    }
+
+    private Optional<String> findCodingSnippet(ProjectDetail detail, String nodeId) {
+        for (ClassInfo classInfo : detail.classes()) {
+            if (classInfo.id().equals(nodeId)) {
+                return readClassHeaderSnippet(classInfo);
+            }
+            for (MethodInfo method : classInfo.methods()) {
+                if (method.id().equals(nodeId)) {
+                    return readSnippet(classInfo.name() + "." + method.name(), classInfo.filePath(), method.beginLine(), method.endLine());
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     private Optional<String> findSnippet(ProjectDetail detail, String nodeId) {
@@ -816,6 +1008,15 @@ public class AiSummaryService {
             }
         }
         return Optional.empty();
+    }
+
+    private Optional<String> readClassHeaderSnippet(ClassInfo classInfo) {
+        int firstMethodLine = classInfo.methods().stream()
+                .map(MethodInfo::beginLine)
+                .min(Integer::compareTo)
+                .orElse(classInfo.endLine() + 1);
+        int endLine = Math.max(classInfo.beginLine(), Math.min(classInfo.endLine(), firstMethodLine - 1));
+        return readSnippet(classInfo.name() + " class header", classInfo.filePath(), classInfo.beginLine(), endLine);
     }
 
     private Optional<String> readSnippet(String title, String filePath, int beginLine, int endLine) {
