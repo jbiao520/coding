@@ -3,8 +3,11 @@ import type {
   AiCallGraphResponse,
   AiCodingContextRequest,
   AiCodingContextResponse,
+  AiFlowRecommendationRequest,
+  AiFlowRecommendationResponse,
   AiSummaryRequest,
   AiSummaryResponse,
+  OpenInIdeResponse,
   ProjectDetail,
   SourceResponse,
   WorkspaceSnapshot,
@@ -48,12 +51,20 @@ export function loadSource(path: string): Promise<SourceResponse> {
   return getJson<SourceResponse>(`/api/source?path=${encodeURIComponent(path)}`);
 }
 
+export function openSourceInIde(path: string, line: number): Promise<OpenInIdeResponse> {
+  return postJson<OpenInIdeResponse>("/api/source/open-in-ide", { path, line });
+}
+
 export function loadAiSummary(request: AiSummaryRequest): Promise<AiSummaryResponse> {
   return postJson<AiSummaryResponse>("/api/ai/summary", request);
 }
 
 export function loadAiCallGraph(request: AiCallGraphRequest): Promise<AiCallGraphResponse> {
   return postJson<AiCallGraphResponse>("/api/ai/call-graph", request);
+}
+
+export function loadAiRecommendedFlows(request: AiFlowRecommendationRequest): Promise<AiFlowRecommendationResponse> {
+  return postJson<AiFlowRecommendationResponse>("/api/ai/flows", request);
 }
 
 export function loadAiCodingContext(request: AiCodingContextRequest): Promise<AiCodingContextResponse> {

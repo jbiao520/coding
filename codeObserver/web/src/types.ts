@@ -22,7 +22,9 @@ export type ProjectDetail = {
   classes: ClassInfo[];
   graphNodes: GraphNode[];
   graphEdges: GraphEdge[];
+  references: CodeReference[];
   readingPath: ReadingStep[];
+  flows: FlowInfo[];
 };
 
 export type SourceFile = {
@@ -45,11 +47,15 @@ export type ClassInfo = {
   methods: MethodInfo[];
   nestedClasses: string[];
   concepts: string[];
+  superTypes: string[];
 };
 
 export type FieldInfo = {
+  id: string;
   name: string;
   type: string;
+  beginLine: number;
+  endLine: number;
 };
 
 export type MethodInfo = {
@@ -62,6 +68,26 @@ export type MethodInfo = {
   calls: string[];
   creates: string[];
   concepts: string[];
+  kind: string;
+  parameterTypes: string[];
+  callSites: CallSiteInfo[];
+  readsFields: string[];
+  writesFields: string[];
+  branchFacts: string[];
+  exceptionFacts: string[];
+};
+
+export type CallSiteInfo = {
+  kind: string;
+  name: string;
+  targetOwner: string;
+  targetSignature: string;
+  targetId: string | null;
+  receiverType: string;
+  line: number | null;
+  resolved: boolean;
+  inLambda: boolean;
+  argumentTypes: string[];
 };
 
 export type GraphNode = {
@@ -79,6 +105,25 @@ export type GraphEdge = {
   target: string;
   type: string;
   label: string;
+  data: Record<string, unknown>;
+};
+
+export type SourceSpan = {
+  filePath: string;
+  beginLine: number;
+  beginColumn: number;
+  endLine: number;
+  endColumn: number;
+};
+
+export type CodeReference = {
+  id: string;
+  kind: "CALL" | "FIELD_READ" | "FIELD_WRITE" | "CREATE" | "RETURN";
+  sourceNodeId: string;
+  targetNodeId: string;
+  symbol: string;
+  detail: string;
+  span: SourceSpan;
 };
 
 export type ReadingStep = {
@@ -90,6 +135,28 @@ export type ReadingStep = {
   line: number;
 };
 
+export type FlowInfo = {
+  id: string;
+  title: string;
+  summary: string;
+  entryNodeId: string;
+  nodeIds: string[];
+  sourceKind: string;
+  confidence: number;
+  tags: string[];
+  steps: FlowStep[];
+};
+
+export type FlowStep = {
+  nodeId: string;
+  title: string;
+  description: string;
+  filePath: string;
+  line: number;
+  stateReads: string[];
+  stateWrites: string[];
+};
+
 export type SourceResponse = {
   path: string;
   content: string;
@@ -99,6 +166,7 @@ export type AiSummaryRequest = {
   projectId: string;
   root: string;
   selectedNodeId?: string;
+  flowId?: string;
   trace?: {
     id: string;
     title: string;
@@ -117,6 +185,7 @@ export type AiCallGraphRequest = {
   projectId: string;
   root: string;
   selectedNodeId?: string;
+  flowId?: string;
   trace?: {
     id: string;
     title: string;
@@ -125,10 +194,23 @@ export type AiCallGraphRequest = {
   };
 };
 
+export type AiFlowRecommendationRequest = {
+  projectId: string;
+  root: string;
+  selectedNodeId?: string;
+  instruction?: string;
+};
+
+export type AiFlowRecommendationResponse = {
+  flows: FlowInfo[];
+  model: string;
+};
+
 export type AiCodingContextRequest = {
   projectId: string;
   root: string;
   selectedNodeId?: string;
+  flowId?: string;
   trace?: {
     id: string;
     title: string;
@@ -136,6 +218,7 @@ export type AiCodingContextRequest = {
     nodeIds: string[];
   };
   task?: string;
+  pinnedSnippets?: PinnedSourceSnippet[];
 };
 
 export type AiCallGraphResponse = {
@@ -149,6 +232,22 @@ export type AiCallGraphResponse = {
 export type AiCodingContextResponse = {
   content: string;
   model: string;
+};
+
+export type PinnedSourceSnippet = {
+  id: string;
+  label: string;
+  filePath: string;
+  beginLine: number;
+  endLine: number;
+  nodeId?: string;
+  source: string;
+};
+
+export type OpenInIdeResponse = {
+  ok: boolean;
+  message: string;
+  command: string;
 };
 
 export type AiCallGraphNode = {

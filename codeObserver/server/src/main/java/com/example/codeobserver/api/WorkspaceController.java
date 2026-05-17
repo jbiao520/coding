@@ -5,8 +5,12 @@ import static com.example.codeobserver.model.WorkspaceModels.AiCallGraphRequest;
 import static com.example.codeobserver.model.WorkspaceModels.AiCallGraphResponse;
 import static com.example.codeobserver.model.WorkspaceModels.AiCodingContextRequest;
 import static com.example.codeobserver.model.WorkspaceModels.AiCodingContextResponse;
+import static com.example.codeobserver.model.WorkspaceModels.AiFlowRecommendationRequest;
+import static com.example.codeobserver.model.WorkspaceModels.AiFlowRecommendationResponse;
 import static com.example.codeobserver.model.WorkspaceModels.AiSummaryRequest;
 import static com.example.codeobserver.model.WorkspaceModels.AiSummaryResponse;
+import static com.example.codeobserver.model.WorkspaceModels.OpenInIdeRequest;
+import static com.example.codeobserver.model.WorkspaceModels.OpenInIdeResponse;
 import static com.example.codeobserver.model.WorkspaceModels.SourceResponse;
 import static com.example.codeobserver.model.WorkspaceModels.WorkspaceSnapshot;
 
@@ -67,6 +71,11 @@ public class WorkspaceController {
         return workspaceService.source(path);
     }
 
+    @PostMapping("/source/open-in-ide")
+    OpenInIdeResponse openInIde(@RequestBody OpenInIdeRequest request) {
+        return workspaceService.openInIde(request);
+    }
+
     @PostMapping("/ai/summary")
     ResponseEntity<?> aiSummary(@RequestBody AiSummaryRequest request) {
         try {
@@ -108,6 +117,18 @@ public class WorkspaceController {
     ResponseEntity<?> aiCallGraph(@RequestBody AiCallGraphRequest request) {
         try {
             AiCallGraphResponse response = aiSummaryService.generateCallGraph(request);
+            return ResponseEntity.ok(response);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.status(404).body(Map.of("message", ex.getMessage()));
+        } catch (IllegalStateException ex) {
+            return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage()));
+        }
+    }
+
+    @PostMapping("/ai/flows")
+    ResponseEntity<?> aiFlows(@RequestBody AiFlowRecommendationRequest request) {
+        try {
+            AiFlowRecommendationResponse response = aiSummaryService.recommendFlows(request);
             return ResponseEntity.ok(response);
         } catch (IllegalArgumentException ex) {
             return ResponseEntity.status(404).body(Map.of("message", ex.getMessage()));

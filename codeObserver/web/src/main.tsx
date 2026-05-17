@@ -6,6 +6,7 @@ import {
   Controls,
   MarkerType,
   MiniMap,
+  Position,
   ReactFlow,
   type Edge,
   type Node,
@@ -19,6 +20,7 @@ import {
   ChevronRight,
   Clipboard,
   ClipboardCheck,
+  ExternalLink,
   FileCode2,
   FolderSearch,
   GitBranch,
@@ -30,6 +32,8 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Package as PackageIcon,
+  Pin,
+  PinOff,
   RefreshCw,
   Route,
   Search,
@@ -38,13 +42,17 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { loadAiCallGraph, loadProject, loadSource, scanWorkspace, streamAiCodingContext, streamAiSummary } from "./api";
+import { loadAiCallGraph, loadAiRecommendedFlows, loadProject, loadSource, openSourceInIde, scanWorkspace, streamAiCodingContext, streamAiSummary } from "./api";
 import type {
   AiCallGraphResponse,
   ClassInfo,
+  CodeReference,
+  FlowInfo,
+  FlowStep,
   GraphEdge,
   GraphNode,
   MethodInfo,
+  PinnedSourceSnippet,
   ProjectDetail,
   ProjectSummary,
   SourceResponse,
@@ -66,6 +74,11 @@ type BusinessTrace = {
   title: string;
   summary: string;
   nodeIds: string[];
+  sourceKind?: string;
+  confidence?: number;
+  tags?: string[];
+  steps?: FlowStep[];
+  isBackendFlow?: boolean;
 };
 
 type PackageGroup = {
@@ -105,6 +118,18 @@ type SourceLineJump = {
   line: number;
 };
 
+type ReferenceJump = {
+  label: string;
+  nodeId: string;
+  filePath: string;
+  line: number;
+};
+
+type SourceLineReference = {
+  reference: CodeReference;
+  jump?: ReferenceJump;
+};
+
 type AiCacheEntry = {
   outputMode: AiOutputMode;
   question: string;
@@ -116,6 +141,16 @@ type AiCacheEntry = {
 };
 
 const AI_CACHE_PREFIX = "codeObserver.ai.v1";
+const PROJECTS_COLLAPSED_STORAGE_KEY = "codeObserver.projectsCollapsed.v1";
+const TRACE_PANEL_COLLAPSED_STORAGE_KEY = "codeObserver.tracePanelCollapsed.v1";
+const TRACE_PANEL_HEIGHT_STORAGE_KEY = "codeObserver.tracePanelHeight.v1";
+const NAVIGATOR_WIDTH_STORAGE_KEY = "codeObserver.navigatorWidth.v1";
+const TRACE_PANEL_HEIGHT_DEFAULT = 240;
+const TRACE_PANEL_HEIGHT_MIN = 120;
+const TRACE_PANEL_HEIGHT_MAX = 520;
+const NAVIGATOR_WIDTH_DEFAULT = 330;
+const NAVIGATOR_WIDTH_MIN = 240;
+const NAVIGATOR_WIDTH_MAX = 560;
 const aiMemoryCache = new Map<string, string>();
 
 function App() {
@@ -126,13 +161,23 @@ function App() {
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [source, setSource] = useState<SourceResponse | null>(null);
   const [selection, setSelection] = useState<Selection>({});
+  const [pinnedSnippets, setPinnedSnippets] = useState<PinnedSourceSnippet[]>([]);
   const [sourceHistory, setSourceHistory] = useState<SourceNavigationEntry[]>([]);
   const [sourceHistoryIndex, setSourceHistoryIndex] = useState(-1);
   const [selectedTraceId, setSelectedTraceId] = useState("");
+  const [aiRecommendedFlows, setAiRecommendedFlows] = useState<BusinessTrace[]>([]);
+  const [aiFlowLoading, setAiFlowLoading] = useState(false);
+  const [aiFlowError, setAiFlowError] = useState("");
   const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false);
   const [activeDrawerTab, setActiveDrawerTab] = useState<DrawerTab>("source");
-  const [tracePanelCollapsed, setTracePanelCollapsed] = useState(false);
-  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
+  const [tracePanelCollapsed, setTracePanelCollapsed] = useState(() => readBooleanPreference(TRACE_PANEL_COLLAPSED_STORAGE_KEY));
+  const [tracePanelHeight, setTracePanelHeight] = useState(() =>
+    readNumberPreference(TRACE_PANEL_HEIGHT_STORAGE_KEY, TRACE_PANEL_HEIGHT_DEFAULT, TRACE_PANEL_HEIGHT_MIN, TRACE_PANEL_HEIGHT_MAX),
+  );
+  const [projectsCollapsed, setProjectsCollapsed] = useState(() => readBooleanPreference(PROJECTS_COLLAPSED_STORAGE_KEY));
+  const [navigatorWidth, setNavigatorWidth] = useState(() =>
+    readNumberPreference(NAVIGATOR_WIDTH_STORAGE_KEY, NAVIGATOR_WIDTH_DEFAULT, NAVIGATOR_WIDTH_MIN, NAVIGATOR_WIDTH_MAX),
+  );
   const [query, setQuery] = useState("");
   const [expandedPackages, setExpandedPackages] = useState<Set<string>>(new Set());
   const [expandedClasses, setExpandedClasses] = useState<Set<string>>(new Set());
@@ -151,12 +196,29 @@ function App() {
   const [aiGraph, setAiGraph] = useState<AiCallGraphResponse | null>(null);
   const [aiGraphLoading, setAiGraphLoading] = useState(false);
   const [aiGraphError, setAiGraphError] = useState("");
+  const [openIdeStatus, setOpenIdeStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     void handleScan("");
   }, []);
+
+  useEffect(() => {
+    writeBooleanPreference(PROJECTS_COLLAPSED_STORAGE_KEY, projectsCollapsed);
+  }, [projectsCollapsed]);
+
+  useEffect(() => {
+    writeBooleanPreference(TRACE_PANEL_COLLAPSED_STORAGE_KEY, tracePanelCollapsed);
+  }, [tracePanelCollapsed]);
+
+  useEffect(() => {
+    writeNumberPreference(TRACE_PANEL_HEIGHT_STORAGE_KEY, tracePanelHeight);
+  }, [tracePanelHeight]);
+
+  useEffect(() => {
+    writeNumberPreference(NAVIGATOR_WIDTH_STORAGE_KEY, navigatorWidth);
+  }, [navigatorWidth]);
 
   useEffect(() => {
     if (!selectedProjectId) {
@@ -180,6 +242,7 @@ function App() {
         setAiContextLoading(false);
         setAiContextError("");
         setAiContextCopied(false);
+        setPinnedSnippets([]);
         setExpandedPackages(new Set());
         setExpandedClasses(new Set());
         setSourceHistory([]);
@@ -187,7 +250,11 @@ function App() {
         setGraphMode("code");
         setAiGraph(null);
         setAiGraphError("");
-        const traces = buildBusinessTraces(nextDetail);
+        setAiRecommendedFlows([]);
+        setAiFlowLoading(false);
+        setAiFlowError("");
+        setOpenIdeStatus("");
+        const traces = buildRecommendedFlows(nextDetail);
         setSelectedTraceId(traces[0]?.id ?? "");
         const firstStep = nextDetail.readingPath[0];
         const firstNode = nextDetail.graphNodes[0];
@@ -239,24 +306,19 @@ function App() {
     [detail, selection.nodeId],
   );
 
+  const normalizedQuery = useMemo(() => query.trim().toLowerCase(), [query]);
+
   const filteredClasses = useMemo(() => {
     if (!detail) {
       return [];
     }
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) {
+    if (!normalizedQuery) {
       return detail.classes;
     }
     return detail.classes.filter((classInfo) => {
-      const target = [
-        classInfo.name,
-        classInfo.qualifiedName,
-        classInfo.concepts.join(" "),
-        classInfo.methods.map((method) => method.name).join(" "),
-      ].join(" ").toLowerCase();
-      return target.includes(normalized);
+      return classMatchesQuery(classInfo, normalizedQuery) || packageMatchesQuery(classInfo, normalizedQuery);
     });
-  }, [detail, query]);
+  }, [detail, normalizedQuery]);
 
   const packageGroups = useMemo<PackageGroup[]>(() => {
     const groups = new Map<string, ClassInfo[]>();
@@ -272,7 +334,32 @@ function App() {
       }));
   }, [filteredClasses]);
 
-  const businessTraces = useMemo(() => (detail ? buildBusinessTraces(detail) : []), [detail]);
+  const searchExpandedPackages = useMemo(() => {
+    if (!normalizedQuery) {
+      return expandedPackages;
+    }
+    const next = new Set(expandedPackages);
+    packageGroups.forEach((group) => next.add(group.name));
+    return next;
+  }, [expandedPackages, normalizedQuery, packageGroups]);
+
+  const searchExpandedClasses = useMemo(() => {
+    if (!normalizedQuery) {
+      return expandedClasses;
+    }
+    const next = new Set(expandedClasses);
+    filteredClasses.forEach((classInfo) => {
+      if (classBodyMatchesQuery(classInfo, normalizedQuery)) {
+        next.add(classInfo.id);
+      }
+    });
+    return next;
+  }, [expandedClasses, filteredClasses, normalizedQuery]);
+
+  const businessTraces = useMemo(
+    () => (aiRecommendedFlows.length ? aiRecommendedFlows : detail ? buildRecommendedFlows(detail) : []),
+    [aiRecommendedFlows, detail],
+  );
   const selectedTrace = useMemo(
     () => businessTraces.find((trace) => trace.id === selectedTraceId),
     [businessTraces, selectedTraceId],
@@ -288,8 +375,9 @@ function App() {
       traceId: selectedTrace?.id,
       nodeId: selectedTrace ? undefined : selection.nodeId,
       question: aiQuestion,
+      pinsKey: pinnedSnippets.map((snippet) => snippet.id).join("|"),
     });
-  }, [aiQuestion, detail, root, selectedProjectId, selectedTrace, selection.nodeId, workspaceRoot]);
+  }, [aiQuestion, detail, pinnedSnippets, root, selectedProjectId, selectedTrace, selection.nodeId, workspaceRoot]);
 
   const aiSourceLinks = useMemo(() => {
     if (!detail) {
@@ -503,6 +591,7 @@ function App() {
       projectId: selectedProjectId,
       root: workspaceRoot || root,
       selectedNodeId: selection.nodeId,
+      flowId: selectedTrace?.isBackendFlow ? selectedTrace.id : undefined,
       trace: selectedTrace,
       question,
     }, (chunk) => {
@@ -543,8 +632,10 @@ function App() {
       projectId: selectedProjectId,
       root: workspaceRoot || root,
       selectedNodeId: selection.nodeId,
+      flowId: selectedTrace?.isBackendFlow ? selectedTrace.id : undefined,
       trace: selectedTrace,
       task,
+      pinnedSnippets,
     }, (chunk) => {
       content += chunk;
       setAiContext((current) => current + chunk);
@@ -582,6 +673,7 @@ function App() {
       projectId: selectedProjectId,
       root: workspaceRoot || root,
       selectedNodeId: selection.nodeId,
+      flowId: selectedTrace?.isBackendFlow ? selectedTrace.id : undefined,
       trace: selectedTrace,
     })
       .then((nextGraph) => {
@@ -589,6 +681,35 @@ function App() {
       })
       .catch((err: Error) => setAiGraphError(readableError(err.message)))
       .finally(() => setAiGraphLoading(false));
+  }
+
+  function handleAiRecommendedFlows() {
+    if (!detail || !selectedProjectId) {
+      return;
+    }
+    setAiFlowLoading(true);
+    setAiFlowError("");
+    loadAiRecommendedFlows({
+      projectId: selectedProjectId,
+      root: workspaceRoot || root,
+      selectedNodeId: selection.nodeId,
+      instruction: aiQuestion,
+    })
+      .then((response) => {
+        const nextFlows = response.flows.map(flowInfoToTrace);
+        setAiRecommendedFlows(nextFlows);
+        setSelectedTraceId(nextFlows[0]?.id ?? "");
+        setGraphMode("code");
+        setAiGraph(null);
+        setAiGraphError("");
+        const firstNodeId = nextFlows[0]?.nodeIds[0];
+        const firstNode = firstNodeId ? detail.graphNodes.find((node) => node.id === firstNodeId) : undefined;
+        if (firstNode) {
+          setSelection({ nodeId: firstNode.id, filePath: firstNode.filePath, line: firstNode.line });
+        }
+      })
+      .catch((err: Error) => setAiFlowError(readableError(err.message)))
+      .finally(() => setAiFlowLoading(false));
   }
 
   function openAiDrawer(question = "", force = false) {
@@ -643,6 +764,186 @@ function App() {
     }
   }
 
+  function addPinnedSnippet(snippet: PinnedSourceSnippet) {
+    setPinnedSnippets((current) => {
+      const withoutDuplicate = current.filter((item) => item.id !== snippet.id);
+      return [snippet, ...withoutDuplicate].slice(0, 24);
+    });
+  }
+
+  function removePinnedSnippet(id: string) {
+    setPinnedSnippets((current) => current.filter((snippet) => snippet.id !== id));
+  }
+
+  function clearPinnedSnippets() {
+    setPinnedSnippets([]);
+  }
+
+  function pinCurrentSelection() {
+    if (!detail || !source) {
+      return;
+    }
+    const range = selection.nodeId ? sourceRangeForNode(detail, selection.nodeId) : null;
+    const fallbackLine = selection.line ?? 1;
+    const snippet = buildPinnedSnippetFromContent({
+      label: range?.label ?? `Line ${fallbackLine}`,
+      filePath: range?.filePath ?? source.path,
+      beginLine: range?.beginLine ?? fallbackLine,
+      endLine: range?.endLine ?? fallbackLine,
+      nodeId: selection.nodeId,
+      sourcePath: source.path,
+      sourceContent: source.content,
+    });
+    if (snippet) {
+      addPinnedSnippet(snippet);
+    }
+  }
+
+  async function pinSelectedTraceNodes() {
+    if (!detail || !selectedTrace?.nodeIds.length) {
+      return;
+    }
+    const snippets: PinnedSourceSnippet[] = [];
+    for (const nodeId of selectedTrace.nodeIds.slice(0, 10)) {
+      const range = sourceRangeForNode(detail, nodeId);
+      if (!range) {
+        continue;
+      }
+      const sourceResponse = source?.path === range.filePath ? source : await loadSource(range.filePath);
+      const snippet = buildPinnedSnippetFromContent({
+        label: range.label,
+        filePath: range.filePath,
+        beginLine: range.beginLine,
+        endLine: range.endLine,
+        nodeId,
+        sourcePath: sourceResponse.path,
+        sourceContent: sourceResponse.content,
+      });
+      if (snippet) {
+        snippets.push(snippet);
+      }
+    }
+    if (snippets.length) {
+      setPinnedSnippets((current) => {
+        const byId = new Map<string, PinnedSourceSnippet>();
+        [...snippets, ...current].forEach((snippet) => byId.set(snippet.id, snippet));
+        return [...byId.values()].slice(0, 24);
+      });
+    }
+  }
+
+  async function handleOpenInIde() {
+    if (!source) {
+      return;
+    }
+    setOpenIdeStatus("正在打开 IDE...");
+    try {
+      const response = await openSourceInIde(source.path, selection.line ?? 1);
+      setOpenIdeStatus(response.ok ? "已发送到 IDE" : readableError(response.message));
+    } catch (err) {
+      setOpenIdeStatus(err instanceof Error ? readableError(err.message) : "打开 IDE 失败");
+    }
+  }
+
+  function resizeNavigator(nextWidth: number) {
+    setNavigatorWidth(clampNumber(nextWidth, NAVIGATOR_WIDTH_MIN, NAVIGATOR_WIDTH_MAX));
+  }
+
+  function resizeTracePanel(nextHeight: number) {
+    setTracePanelHeight(clampNumber(nextHeight, TRACE_PANEL_HEIGHT_MIN, TRACE_PANEL_HEIGHT_MAX));
+  }
+
+  function handleNavigatorResizeMouseDown(event: React.MouseEvent<HTMLDivElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = navigatorWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    function handleMouseMove(moveEvent: MouseEvent) {
+      resizeNavigator(startWidth + moveEvent.clientX - startX);
+    }
+
+    function handleMouseUp() {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("mousemove", handleMouseMove);
+    }
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp, { once: true });
+  }
+
+  function handleTraceResizeMouseDown(event: React.MouseEvent<HTMLDivElement>) {
+    if (event.button !== 0 || tracePanelCollapsed) {
+      return;
+    }
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = tracePanelHeight;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+
+    function handleMouseMove(moveEvent: MouseEvent) {
+      resizeTracePanel(startHeight + startY - moveEvent.clientY);
+    }
+
+    function handleMouseUp() {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("mousemove", handleMouseMove);
+    }
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp, { once: true });
+  }
+
+  function handleNavigatorResizeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      resizeNavigator(navigatorWidth - 16);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      resizeNavigator(navigatorWidth + 16);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      resizeNavigator(NAVIGATOR_WIDTH_MIN);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      resizeNavigator(NAVIGATOR_WIDTH_MAX);
+    }
+  }
+
+  function handleTraceResizeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      resizeTracePanel(tracePanelHeight + 16);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      resizeTracePanel(tracePanelHeight - 16);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      resizeTracePanel(TRACE_PANEL_HEIGHT_MIN);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      resizeTracePanel(TRACE_PANEL_HEIGHT_MAX);
+    }
+  }
+
+  const workspaceGridStyle = {
+    "--navigator-width": `${navigatorWidth}px`,
+    "--trace-panel-height": `${tracePanelHeight}px`,
+  } as React.CSSProperties;
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -684,6 +985,7 @@ function App() {
           projectsCollapsed ? "projects-collapsed" : "",
           workspaceDrawerOpen ? "drawer-open" : "",
         ].join(" ")}
+        style={workspaceGridStyle}
       >
         <aside className="projects-panel">
           <div className="panel-header">
@@ -733,14 +1035,27 @@ function App() {
                 key={group.name}
                 group={group}
                 selectedNodeId={selection.nodeId}
-                expandedPackages={expandedPackages}
-                expandedClasses={expandedClasses}
+                expandedPackages={searchExpandedPackages}
+                expandedClasses={searchExpandedClasses}
                 onTogglePackage={togglePackage}
                 onToggleClass={toggleClass}
                 onSelect={selectNode}
               />
             ))}
           </div>
+          <div
+            className="navigator-resize-handle"
+            role="separator"
+            aria-label="调整结构面板宽度"
+            aria-orientation="vertical"
+            aria-valuemin={NAVIGATOR_WIDTH_MIN}
+            aria-valuemax={NAVIGATOR_WIDTH_MAX}
+            aria-valuenow={navigatorWidth}
+            tabIndex={0}
+            title="拖拽调整结构面板宽度"
+            onMouseDown={handleNavigatorResizeMouseDown}
+            onKeyDown={handleNavigatorResizeKeyDown}
+          />
         </aside>
 
         <section className={`center-panel ${tracePanelCollapsed ? "trace-collapsed" : ""}`}>
@@ -751,7 +1066,7 @@ function App() {
                 {detail
                   ? graphMode === "ai"
                     ? `${detail.summary.name} · ${aiGraph?.title ?? "AI 正在精简链路"}`
-                    : `${detail.summary.name} · ${selectedTrace ? "业务调用链" : "聚焦当前选中的类或方法"}`
+                    : `${detail.summary.name} · ${selectedTrace ? "推荐 Flow" : "聚焦当前选中的类或方法"}`
                   : "等待扫描"}
               </p>
             </div>
@@ -814,8 +1129,21 @@ function App() {
               node.id,
               node.filePath,
               node.line,
-              graphMode === "ai" ? { preserveAi: true, preserveTrace: true, preserveAiGraph: true } : {},
+              graphMode === "ai" || selectedTrace ? { preserveAi: true, preserveTrace: true, preserveAiGraph: graphMode === "ai" } : {},
             )}
+          />
+          <div
+            className="trace-resize-handle"
+            role="separator"
+            aria-label="调整推荐 Flow 面板高度"
+            aria-orientation="horizontal"
+            aria-valuemin={TRACE_PANEL_HEIGHT_MIN}
+            aria-valuemax={TRACE_PANEL_HEIGHT_MAX}
+            aria-valuenow={tracePanelHeight}
+            tabIndex={tracePanelCollapsed ? -1 : 0}
+            title="拖拽调整推荐 Flow 面板高度"
+            onMouseDown={handleTraceResizeMouseDown}
+            onKeyDown={handleTraceResizeKeyDown}
           />
           <TraceExplorer
             detail={detail}
@@ -823,11 +1151,26 @@ function App() {
             selectedTraceId={selectedTraceId}
             selectedNodeId={selection.nodeId}
             collapsed={tracePanelCollapsed}
+            aiFlowLoading={aiFlowLoading}
+            aiFlowError={aiFlowError}
             onToggleCollapsed={() => setTracePanelCollapsed((collapsed) => !collapsed)}
-            onSelectNode={selectNode}
+            onGenerateAiFlows={handleAiRecommendedFlows}
+            onSelectNode={(nodeId, filePath, line) => {
+              selectNode(nodeId, filePath, line, { preserveAi: true, preserveTrace: true, preserveAiGraph: graphMode === "ai" });
+              openSourceDrawer();
+            }}
             onSelectTrace={selectTrace}
           />
         </section>
+
+        {workspaceDrawerOpen ? (
+          <button
+            className="drawer-backdrop"
+            type="button"
+            aria-label="关闭源码抽屉"
+            onClick={() => setWorkspaceDrawerOpen(false)}
+          />
+        ) : null}
 
         <aside className={`workspace-drawer side-drawer ${workspaceDrawerOpen ? "open" : ""}`} aria-hidden={!workspaceDrawerOpen}>
           <div className="drawer-header">
@@ -869,10 +1212,16 @@ function App() {
                   selectedNode={selectedNode}
                   detail={detail}
                   methodExplanations={aiMethodExplanations}
+                  pinnedCount={pinnedSnippets.length}
+                  canPinTrace={Boolean(selectedTrace?.nodeIds.length)}
+                  openIdeStatus={openIdeStatus}
                   canGoBack={sourceHistoryIndex > 0}
                   canGoForward={sourceHistoryIndex >= 0 && sourceHistoryIndex < sourceHistory.length - 1}
                   onBack={() => moveSourceHistory(-1)}
                   onForward={() => moveSourceHistory(1)}
+                  onOpenInIde={handleOpenInIde}
+                  onPinCurrent={pinCurrentSelection}
+                  onPinTrace={pinSelectedTraceNodes}
                   onJump={(jump) => {
                     jumpToSource({
                       nodeId: jump.nodeId,
@@ -899,11 +1248,14 @@ function App() {
                   contextCopied={aiContextCopied}
                   disabled={!detail}
                   sourceLinks={aiSourceLinks}
+                  pinnedSnippets={pinnedSnippets}
                   onQuestionChange={setAiQuestion}
                   onAsk={() => openAiDrawer(aiQuestion, true)}
                   onGenerateContext={() => openContextDrawer(true)}
                   onCopyContext={copyAiContext}
                   onClearHistory={clearAiHistory}
+                  onRemovePin={removePinnedSnippet}
+                  onClearPins={clearPinnedSnippets}
                   onOpenSource={(link) => {
                     jumpToSource({
                       nodeId: link.id,
@@ -942,6 +1294,26 @@ function Concepts({ concepts }: { concepts: string[] }) {
       ))}
     </div>
   );
+}
+
+function packageMatchesQuery(classInfo: ClassInfo, normalizedQuery: string) {
+  const packageName = classInfo.packageName || "(default package)";
+  return packageName.toLowerCase().includes(normalizedQuery);
+}
+
+function classBodyMatchesQuery(classInfo: ClassInfo, normalizedQuery: string) {
+  return [
+    classInfo.name,
+    classInfo.concepts.join(" "),
+    classInfo.methods.map((method) => method.name).join(" "),
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(normalizedQuery);
+}
+
+function classMatchesQuery(classInfo: ClassInfo, normalizedQuery: string) {
+  return classBodyMatchesQuery(classInfo, normalizedQuery) || classInfo.qualifiedName.toLowerCase().includes(normalizedQuery);
 }
 
 function ReadingGuide({
@@ -1071,8 +1443,9 @@ function GraphCanvas({
     const methodNodes = focused.nodes.filter((node) => node.type === "method");
     const positionOf = new Map<string, { x: number; y: number }>();
     if (focused.mode === "trace") {
-      methodNodes.forEach((node, index) => positionOf.set(node.id, { x: 48 + index * 290, y: 156 }));
-      classNodes.forEach((node, index) => positionOf.set(node.id, { x: 48 + index * 290, y: 38 }));
+      const orderedIds = selectedTrace?.nodeIds.filter((nodeId) => methodNodes.some((node) => node.id === nodeId)) ?? methodNodes.map((node) => node.id);
+      orderedIds.forEach((nodeId, index) => positionOf.set(nodeId, wrappedTracePosition(index, orderedIds.length)));
+      classNodes.forEach((node, index) => positionOf.set(node.id, { x: 48 + index * 250, y: 38 }));
     } else if (focused.mode === "method") {
       classNodes.forEach((node, index) => positionOf.set(node.id, { x: 330 + index * 250, y: 24 }));
       methodNodes.forEach((node, index) => {
@@ -1097,6 +1470,8 @@ function GraphCanvas({
       nodes: focused.nodes.map((node) => ({
         id: node.id,
         position: positionOf.get(node.id) ?? { x: 0, y: 0 },
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
         data: {
           label: (
             <div className={`flow-node ${node.type} ${node.id === selectedNodeId ? "selected" : ""}`}>
@@ -1115,7 +1490,8 @@ function GraphCanvas({
         label: focused.mode === "trace" ? "" : edge.type === "CALLS" ? edge.label : "",
         animated: edge.type === "CALLS",
         markerEnd: { type: MarkerType.ArrowClosed },
-        className: `edge-${edge.type.toLowerCase()}`,
+        type: focused.mode === "trace" ? "smoothstep" : "default",
+        className: graphEdgeClass(edge),
         style: edge.type === "CALLS" ? { strokeWidth: 2 } : undefined,
       })),
     };
@@ -1154,19 +1530,22 @@ function GraphCanvas({
 
 function buildAiGraph(detail: ProjectDetail, aiGraph: AiCallGraphResponse, selectedNodeId?: string) {
   const sourceNodesById = new Map(detail.graphNodes.map((node) => [node.id, node]));
-  const visibleNodes = aiGraph.nodes.filter((node) => sourceNodesById.has(node.id));
+  const visibleNodes = orderAiGraphNodes(
+    aiGraph.nodes.filter((node) => sourceNodesById.has(node.id)),
+    aiGraph.edges,
+    selectedNodeId,
+  );
   const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
-  const columns = visibleNodes.length <= 4 ? Math.max(visibleNodes.length, 1) : Math.ceil(visibleNodes.length / 2);
+  const columns = graphColumnCount(visibleNodes.length);
   return {
     scope: `${aiGraph.title} · ${visibleNodes.length} 个关键节点 · ${aiGraph.summary}`,
     nodes: visibleNodes.map((node, index) => {
       const sourceNode = sourceNodesById.get(node.id);
       return {
         id: node.id,
-        position: {
-          x: 56 + (index % columns) * 330,
-          y: 76 + Math.floor(index / columns) * 176,
-        },
+        position: gridPosition(index, columns, 56, 76, 330, 176),
+        sourcePosition: Position.Right,
+        targetPosition: Position.Left,
         data: {
           label: (
             <div className={`flow-node ai-generated ${node.importance} ${node.id === selectedNodeId ? "selected" : ""}`}>
@@ -1190,10 +1569,101 @@ function buildAiGraph(detail: ProjectDetail, aiGraph: AiCallGraphResponse, selec
         label: edge.label,
         animated: false,
         markerEnd: { type: MarkerType.ArrowClosed },
+        type: "smoothstep",
         className: "edge-ai",
         style: { strokeWidth: 2.4 },
       } satisfies Edge)),
   };
+}
+
+function orderAiGraphNodes(nodes: AiCallGraphResponse["nodes"], edges: AiCallGraphResponse["edges"], selectedNodeId?: string) {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const incoming = new Map<string, number>();
+  const outgoing = new Map<string, string[]>();
+  for (const node of nodes) {
+    incoming.set(node.id, 0);
+    outgoing.set(node.id, []);
+  }
+  edges.forEach((edge) => {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) {
+      return;
+    }
+    outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
+    incoming.set(edge.target, (incoming.get(edge.target) ?? 0) + 1);
+  });
+
+  const originalIndex = new Map(nodes.map((node, index) => [node.id, index]));
+  const queue = nodes
+    .filter((node) => (incoming.get(node.id) ?? 0) === 0)
+    .sort((left, right) => aiNodeRank(left.id, selectedNodeId, originalIndex) - aiNodeRank(right.id, selectedNodeId, originalIndex));
+  const ordered: typeof nodes = [];
+  while (queue.length) {
+    const node = queue.shift()!;
+    if (ordered.some((item) => item.id === node.id)) {
+      continue;
+    }
+    ordered.push(node);
+    for (const targetId of outgoing.get(node.id) ?? []) {
+      incoming.set(targetId, Math.max(0, (incoming.get(targetId) ?? 0) - 1));
+      if ((incoming.get(targetId) ?? 0) === 0) {
+        const target = nodes.find((candidate) => candidate.id === targetId);
+        if (target) {
+          queue.push(target);
+          queue.sort((left, right) => aiNodeRank(left.id, selectedNodeId, originalIndex) - aiNodeRank(right.id, selectedNodeId, originalIndex));
+        }
+      }
+    }
+  }
+
+  const remaining = nodes.filter((node) => !ordered.some((item) => item.id === node.id));
+  return [...ordered, ...remaining].sort((left, right) => {
+    if (left.id === selectedNodeId) {
+      return -1;
+    }
+    if (right.id === selectedNodeId) {
+      return 1;
+    }
+    return 0;
+  });
+}
+
+function aiNodeRank(nodeId: string, selectedNodeId: string | undefined, originalIndex: Map<string, number>) {
+  return (nodeId === selectedNodeId ? -100 : 0) + (originalIndex.get(nodeId) ?? 0);
+}
+
+function graphColumnCount(count: number) {
+  if (count <= 1) {
+    return 1;
+  }
+  if (count <= 4) {
+    return count;
+  }
+  return Math.min(4, Math.ceil(count / 2));
+}
+
+function gridPosition(index: number, columns: number, startX: number, startY: number, xGap: number, yGap: number) {
+  return {
+    x: startX + (index % columns) * xGap,
+    y: startY + Math.floor(index / columns) * yGap,
+  };
+}
+
+function wrappedTracePosition(index: number, total: number) {
+  const columns = graphColumnCount(total);
+  const row = Math.floor(index / columns);
+  const col = index % columns;
+  return {
+    x: 56 + col * 300,
+    y: 92 + row * 144,
+  };
+}
+
+function graphEdgeClass(edge: GraphEdge) {
+  const dispatch = typeof edge.data?.dispatch === "string" ? edge.data.dispatch : "";
+  return [
+    `edge-${edge.type.toLowerCase()}`,
+    dispatch === "interface-implementation" ? "edge-implementation" : "",
+  ].filter(Boolean).join(" ");
 }
 
 type FocusedGraph = {
@@ -1228,6 +1698,27 @@ function buildTraceGraph(detail: ProjectDetail, trace: BusinessTrace): FocusedGr
     incomingIds: new Set<string>(),
     incomingIdsArray: [],
     outgoingIdsArray: trace.nodeIds.slice(1),
+  };
+}
+
+function buildRecommendedFlows(detail: ProjectDetail): BusinessTrace[] {
+  if (Array.isArray(detail.flows)) {
+    return detail.flows.map(flowInfoToTrace);
+  }
+  return buildBusinessTraces(detail);
+}
+
+function flowInfoToTrace(flow: FlowInfo): BusinessTrace {
+  return {
+    id: flow.id,
+    title: flow.title,
+    summary: flow.summary,
+    nodeIds: flow.nodeIds,
+    sourceKind: flow.sourceKind,
+    confidence: flow.confidence,
+    tags: flow.tags,
+    steps: flow.steps,
+    isBackendFlow: true,
   };
 }
 
@@ -1363,8 +1854,16 @@ function buildBusinessTraces(detail: ProjectDetail): BusinessTrace[] {
     }
   }
   return [...unique.values()]
-    .sort((left, right) => right.nodeIds.length - left.nodeIds.length)
+    .sort((left, right) => flowDisplayScore(right) - flowDisplayScore(left))
     .slice(0, 12);
+}
+
+function flowDisplayScore(trace: BusinessTrace) {
+  const preferredLength = trace.nodeIds.length >= 3 && trace.nodeIds.length <= 6 ? 12 : 0;
+  const confidence = typeof trace.confidence === "number" ? trace.confidence * 8 : 0;
+  const backendBoost = trace.isBackendFlow ? 4 : 0;
+  const lengthPenalty = Math.max(0, trace.nodeIds.length - 6) * 2;
+  return preferredLength + confidence + backendBoost + Math.min(trace.nodeIds.length, 6) - lengthPenalty;
 }
 
 function collectTracePaths(
@@ -1434,6 +1933,131 @@ function methodById(detail: ProjectDetail, nodeId: string) {
   return undefined;
 }
 
+function classByNodeId(detail: ProjectDetail, nodeId: string) {
+  return detail.classes.find((classInfo) => classInfo.id === nodeId || classInfo.methods.some((method) => method.id === nodeId));
+}
+
+function fieldById(detail: ProjectDetail, fieldId: string) {
+  for (const classInfo of detail.classes) {
+    const field = classInfo.fields.find((item) => item.id === fieldId);
+    if (field) {
+      return { field, owner: classInfo };
+    }
+  }
+  return undefined;
+}
+
+function sourceRangeForNode(detail: ProjectDetail, nodeId: string) {
+  const classInfo = classByNodeId(detail, nodeId);
+  if (!classInfo) {
+    const fieldMatch = fieldById(detail, nodeId);
+    if (!fieldMatch) {
+      return null;
+    }
+    return {
+      label: `${fieldMatch.owner.name}.${fieldMatch.field.name}`,
+      filePath: fieldMatch.owner.filePath,
+      beginLine: fieldMatch.field.beginLine,
+      endLine: fieldMatch.field.endLine,
+    };
+  }
+  const method = classInfo.methods.find((item) => item.id === nodeId);
+  if (method) {
+    return {
+      label: `${classInfo.name}.${method.name}`,
+      filePath: classInfo.filePath,
+      beginLine: method.beginLine,
+      endLine: method.endLine,
+    };
+  }
+  return {
+    label: classInfo.name,
+    filePath: classInfo.filePath,
+    beginLine: classInfo.beginLine,
+    endLine: classInfo.endLine,
+  };
+}
+
+function buildPinnedSnippetFromContent({
+  label,
+  filePath,
+  beginLine,
+  endLine,
+  nodeId,
+  sourcePath,
+  sourceContent,
+}: {
+  label: string;
+  filePath: string;
+  beginLine: number;
+  endLine: number;
+  nodeId?: string;
+  sourcePath: string;
+  sourceContent: string;
+}): PinnedSourceSnippet | null {
+  if (sourcePath !== filePath) {
+    return null;
+  }
+  const lines = sourceContent.split("\n");
+  const start = Math.max(1, beginLine);
+  const end = Math.min(lines.length, Math.max(start, endLine));
+  const snippetSource = lines.slice(start - 1, end).join("\n");
+  const id = `${filePath}:${start}-${end}:${nodeId ?? label}`;
+  return {
+    id,
+    label,
+    filePath,
+    beginLine: start,
+    endLine: end,
+    nodeId,
+    source: snippetSource,
+  };
+}
+
+function referenceKindLabel(kind: CodeReference["kind"]) {
+  switch (kind) {
+    case "CALL":
+      return "CALL";
+    case "CREATE":
+      return "NEW";
+    case "FIELD_READ":
+      return "READ";
+    case "FIELD_WRITE":
+      return "WRITE";
+    case "RETURN":
+      return "RETURN";
+    default:
+      return kind;
+  }
+}
+
+function referenceTargetJump(detail: ProjectDetail, reference: CodeReference): ReferenceJump | undefined {
+  if (!reference.targetNodeId) {
+    return undefined;
+  }
+  const graphNode = detail.graphNodes.find((node) => node.id === reference.targetNodeId);
+  if (graphNode) {
+    return {
+      label: graphNode.type === "method"
+        ? `跳转到 ${ownerClassName(detail, graphNode.id) ? `${ownerClassName(detail, graphNode.id)}.` : ""}${graphNode.label}`
+        : `跳转到 ${graphNode.label}`,
+      nodeId: graphNode.id,
+      filePath: graphNode.filePath,
+      line: graphNode.line,
+    };
+  }
+  const fieldMatch = fieldById(detail, reference.targetNodeId);
+  if (fieldMatch) {
+    return {
+      label: `跳转到字段 ${fieldMatch.owner.name}.${fieldMatch.field.name}`,
+      nodeId: fieldMatch.field.id,
+      filePath: fieldMatch.owner.filePath,
+      line: fieldMatch.field.beginLine,
+    };
+  }
+  return undefined;
+}
+
 function readableError(message: string) {
   try {
     const parsed = JSON.parse(message) as { message?: string };
@@ -1485,12 +2109,14 @@ function buildAiCacheKey({
   traceId,
   nodeId,
   question,
+  pinsKey,
 }: {
   root: string;
   projectId: string;
   traceId?: string;
   nodeId?: string;
   question: string;
+  pinsKey?: string;
 }) {
   const target = traceId ? `trace:${traceId}` : `node:${nodeId ?? "project"}`;
   const normalizedQuestion = question.trim() || "__default__";
@@ -1500,6 +2126,7 @@ function buildAiCacheKey({
     encodeURIComponent(projectId),
     encodeURIComponent(target),
     encodeURIComponent(normalizedQuestion),
+    encodeURIComponent(pinsKey || "no-pins"),
   ].join(":");
 }
 
@@ -1541,6 +2168,47 @@ function removeAiCache(key: string) {
   } catch {
     // Best-effort cache only.
   }
+}
+
+function readBooleanPreference(key: string) {
+  try {
+    return browserLocalStorage()?.getItem(key) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeBooleanPreference(key: string, value: boolean) {
+  try {
+    browserLocalStorage()?.setItem(key, value ? "true" : "false");
+  } catch {
+    // Best-effort UI preference only.
+  }
+}
+
+function readNumberPreference(key: string, fallback: number, min: number, max: number) {
+  try {
+    const rawValue = browserLocalStorage()?.getItem(key);
+    if (rawValue === null || rawValue === undefined) {
+      return fallback;
+    }
+    const value = Number(rawValue);
+    return Number.isFinite(value) ? clampNumber(value, min, max) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeNumberPreference(key: string, value: number) {
+  try {
+    browserLocalStorage()?.setItem(key, String(Math.round(value)));
+  } catch {
+    // Best-effort UI preference only.
+  }
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function browserLocalStorage() {
@@ -1652,7 +2320,10 @@ function TraceExplorer({
   selectedTraceId,
   selectedNodeId,
   collapsed,
+  aiFlowLoading,
+  aiFlowError,
   onToggleCollapsed,
+  onGenerateAiFlows,
   onSelectNode,
   onSelectTrace,
 }: {
@@ -1661,7 +2332,10 @@ function TraceExplorer({
   selectedTraceId: string;
   selectedNodeId?: string;
   collapsed: boolean;
+  aiFlowLoading: boolean;
+  aiFlowError: string;
   onToggleCollapsed: () => void;
+  onGenerateAiFlows: () => void;
   onSelectNode: (nodeId: string, filePath: string, line: number) => void;
   onSelectTrace: (trace: BusinessTrace) => void;
 }) {
@@ -1673,9 +2347,9 @@ function TraceExplorer({
   if (collapsed) {
     return (
       <section className="reading-path collapsed">
-        <button className="trace-collapse-rail" type="button" onClick={onToggleCollapsed} title="展开调用链和链路步骤">
+        <button className="trace-collapse-rail" type="button" onClick={onToggleCollapsed} title="展开推荐 Flow 和步骤">
           <PanelBottomOpen size={15} />
-          <strong>调用链 / 链路步骤</strong>
+          <strong>推荐 Flow / 步骤</strong>
           <span>{selectedTrace ? selectedTrace.title : "展开查看阅读路径"}</span>
         </button>
       </section>
@@ -1685,12 +2359,22 @@ function TraceExplorer({
     <section className="reading-path">
       <div className="trace-column">
         <div className="trace-header-row">
-          <PanelTitle icon={<Route size={16} />} title="调用链" />
-          <button type="button" onClick={onToggleCollapsed} title="折叠调用链和链路步骤">
-            <PanelBottomClose size={15} />
-          </button>
+          <PanelTitle icon={<Route size={16} />} title="推荐 Flow" />
+          <div className="trace-header-actions">
+            <button type="button" onClick={onGenerateAiFlows} disabled={aiFlowLoading} title="基于当前选中类或方法生成推荐 Flow">
+              <Sparkles size={15} />
+            </button>
+            <button type="button" onClick={onToggleCollapsed} title="折叠推荐 Flow 和步骤">
+              <PanelBottomClose size={15} />
+            </button>
+          </div>
         </div>
         <div className="trace-list">
+          {aiFlowLoading ? <div className="trace-feedback">AI 正在生成推荐 Flow...</div> : null}
+          {aiFlowError ? <div className="trace-feedback error">{aiFlowError}</div> : null}
+          {!aiFlowLoading && !traces.length ? (
+            <div className="trace-empty">选中一个类或方法后，点击上方星标生成推荐 Flow。</div>
+          ) : null}
           {traces.map((trace) => (
             <button
               key={trace.id}
@@ -1699,6 +2383,7 @@ function TraceExplorer({
             >
               <strong>{trace.title}</strong>
               <span>{trace.summary}</span>
+              <FlowMeta trace={trace} />
             </button>
           ))}
         </div>
@@ -1710,6 +2395,7 @@ function TraceExplorer({
         <div className="trace-steps">
           {(selectedTrace?.nodeIds ?? []).map((nodeId, index) => {
             const node = nodesById.get(nodeId);
+            const flowStep = selectedTrace?.steps?.[index];
             if (!node) {
               return null;
             }
@@ -1720,8 +2406,9 @@ function TraceExplorer({
                 onClick={() => onSelectNode(node.id, node.filePath, node.line)}
               >
                 <span className="step-index">{index + 1}</span>
-                <strong>{ownerClassName(detail, node.id) ? `${ownerClassName(detail, node.id)}.${node.label}` : node.label}</strong>
-                <span>{describeStep(detail, node, index)}</span>
+                <strong>{flowStep?.title ?? (ownerClassName(detail, node.id) ? `${ownerClassName(detail, node.id)}.${node.label}` : node.label)}</strong>
+                <span>{flowStep?.description ?? describeStep(detail, node, index)}</span>
+                <StateFacts step={flowStep} />
               </button>
             );
           })}
@@ -1744,6 +2431,40 @@ function TraceExplorer({
   );
 }
 
+function FlowMeta({ trace }: { trace: BusinessTrace }) {
+  if (!trace.isBackendFlow) {
+    return null;
+  }
+  const confidence = typeof trace.confidence === "number" ? `${Math.round(trace.confidence * 100)}%` : "";
+  return (
+    <div className="flow-meta">
+      {trace.sourceKind ? <small>{trace.sourceKind}</small> : null}
+      {confidence ? <small>{confidence}</small> : null}
+      <small>{trace.nodeIds.length} 步</small>
+      {(trace.tags ?? []).slice(0, 3).map((tag) => (
+        <small key={tag}>{tag}</small>
+      ))}
+    </div>
+  );
+}
+
+function StateFacts({ step }: { step?: FlowStep }) {
+  if (!step) {
+    return null;
+  }
+  const reads = step.stateReads?.slice(0, 3) ?? [];
+  const writes = step.stateWrites?.slice(0, 3) ?? [];
+  if (!reads.length && !writes.length) {
+    return null;
+  }
+  return (
+    <div className="state-facts">
+      {reads.length ? <small>读 {reads.join("、")}</small> : null}
+      {writes.length ? <small>写 {writes.join("、")}</small> : null}
+    </div>
+  );
+}
+
 function AiAssistantPanel({
   question,
   outputMode,
@@ -1758,11 +2479,14 @@ function AiAssistantPanel({
   contextCopied,
   disabled,
   sourceLinks,
+  pinnedSnippets,
   onQuestionChange,
   onAsk,
   onGenerateContext,
   onCopyContext,
   onClearHistory,
+  onRemovePin,
+  onClearPins,
   onOpenSource,
 }: {
   question: string;
@@ -1778,11 +2502,14 @@ function AiAssistantPanel({
   contextCopied: boolean;
   disabled: boolean;
   sourceLinks: SourceLink[];
+  pinnedSnippets: PinnedSourceSnippet[];
   onQuestionChange: (value: string) => void;
   onAsk: () => void;
   onGenerateContext: () => void;
   onCopyContext: () => void;
   onClearHistory: () => void;
+  onRemovePin: (id: string) => void;
+  onClearPins: () => void;
   onOpenSource: (link: SourceLink) => void;
 }) {
   const activeModel = outputMode === "context" ? contextModel : model;
@@ -1850,6 +2577,28 @@ function AiAssistantPanel({
                   <span>{link.label}</span>
                   <small>{link.subtitle}</small>
                 </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {pinnedSnippets.length ? (
+          <div className="pinned-snippets" aria-label="固定源码片段">
+            <div>
+              <strong>固定 Context</strong>
+              <button type="button" onClick={onClearPins} title="清空固定片段">
+                <Trash2 size={12} />
+              </button>
+            </div>
+            <div>
+              {pinnedSnippets.map((snippet) => (
+                <span key={snippet.id}>
+                  <Pin size={11} />
+                  <strong>{snippet.label}</strong>
+                  <small>{fileLocationLabel(snippet.filePath, snippet.beginLine)}</small>
+                  <button type="button" onClick={() => onRemovePin(snippet.id)} title="移除固定片段">
+                    <X size={11} />
+                  </button>
+                </span>
               ))}
             </div>
           </div>
@@ -1941,10 +2690,16 @@ function SourceViewer({
   selectedNode,
   detail,
   methodExplanations,
+  pinnedCount,
+  canPinTrace,
+  openIdeStatus,
   canGoBack,
   canGoForward,
   onBack,
   onForward,
+  onOpenInIde,
+  onPinCurrent,
+  onPinTrace,
   onJump,
 }: {
   source: SourceResponse | null;
@@ -1952,10 +2707,16 @@ function SourceViewer({
   selectedNode?: GraphNode;
   detail: ProjectDetail | null;
   methodExplanations: Map<string, MethodExplanation>;
+  pinnedCount: number;
+  canPinTrace: boolean;
+  openIdeStatus: string;
   canGoBack: boolean;
   canGoForward: boolean;
   onBack: () => void;
   onForward: () => void;
+  onOpenInIde: () => void;
+  onPinCurrent: () => void;
+  onPinTrace: () => void;
   onJump: (jump: SourceLineJump) => void;
 }) {
   const sourcePreRef = useRef<HTMLPreElement | null>(null);
@@ -1964,7 +2725,7 @@ function SourceViewer({
     if (!selectedNode || !detail) {
       return null;
     }
-    const owner = detail.classes.find((classInfo) => classInfo.id === selectedNode.id || classInfo.methods.some((method) => method.id === selectedNode.id));
+    const owner = classByNodeId(detail, selectedNode.id);
     if (!owner) {
       return null;
     }
@@ -1979,13 +2740,6 @@ function SourceViewer({
       return annotations;
     }
     const fileClasses = detail.classes.filter((classInfo) => classInfo.filePath === source.path);
-    const explainedMethods = detail.classes.flatMap((classInfo) => classInfo.methods
-      .map((method) => ({
-        method,
-        owner: classInfo.name,
-        explanation: methodExplanations.get(method.id),
-      }))
-      .filter((item): item is { method: MethodInfo; owner: string; explanation: MethodExplanation } => Boolean(item.explanation)));
     fileClasses.forEach((classInfo) => {
       classInfo.methods.forEach((method) => {
         const explanation = methodExplanations.get(method.id);
@@ -1999,28 +2753,27 @@ function SourceViewer({
             });
           }
         }
-        explainedMethods
-          .filter((target) => target.method.id !== method.id)
-          .forEach((target) => {
-            for (let lineNo = method.beginLine + 1; lineNo <= method.endLine; lineNo += 1) {
-              const line = lines[lineNo - 1] ?? "";
-              if (!lineCallsMethod(line, target.method.name)) {
-                continue;
-              }
-              annotations.set(lineNo, {
-                label: `调用 ${target.owner}.${target.method.name}`,
-                text: target.explanation.text,
-                entryLine: lineNo,
-                kind: "call",
-                triggerText: target.method.name,
-              });
-            }
-          });
-        });
+      });
     });
+    detail.references
+      .filter((reference) => reference.kind === "CALL" && reference.span.filePath === source.path)
+      .forEach((reference) => {
+        const explanation = methodExplanations.get(reference.targetNodeId);
+        if (!explanation) {
+          return;
+        }
+        annotations.set(reference.span.beginLine, {
+          label: `调用 ${explanation.label}`,
+          text: explanation.text,
+          entryLine: reference.span.beginLine,
+          kind: "call",
+          triggerText: reference.symbol,
+        });
+      });
     return annotations;
-  }, [detail, lines, methodExplanations, source]);
-  const lineJumps = useMemo(() => buildSourceLineJumps(source, detail, lines), [detail, lines, source]);
+  }, [detail, methodExplanations, source]);
+  const lineReferences = useMemo(() => buildSourceLineReferences(source, detail), [detail, source]);
+  const lineJumps = useMemo(() => buildDeclarationLineJumps(source, detail), [detail, source]);
   useEffect(() => {
     if (!highlightLine || !sourcePreRef.current) {
       return;
@@ -2043,6 +2796,19 @@ function SourceViewer({
           </button>
         </div>
         <div className="source-path">{source.path}{highlightLine ? `:${highlightLine}` : ""}</div>
+        <div className="source-toolbar-actions">
+          <button type="button" onClick={onPinCurrent} title="固定当前源码片段">
+            <Pin size={14} />
+            <span>{pinnedCount || ""}</span>
+          </button>
+          <button type="button" onClick={onPinTrace} disabled={!canPinTrace} title="固定当前调用链节点">
+            <PinOff size={14} />
+          </button>
+          <button type="button" onClick={onOpenInIde} title="在 IDE 打开">
+            <ExternalLink size={14} />
+          </button>
+        </div>
+        {openIdeStatus ? <div className="source-toolbar-status">{openIdeStatus}</div> : null}
       </div>
       <pre ref={sourcePreRef}>
         {lines.map((line, index) => {
@@ -2050,6 +2816,7 @@ function SourceViewer({
           const inRange = activeRange ? lineNo >= activeRange.begin && lineNo <= activeRange.end : false;
           const explanation = lineExplanations.get(lineNo);
           const jump = lineJumps.get(lineNo);
+          const references = lineReferences.get(lineNo) ?? [];
           return (
             <div
               key={lineNo}
@@ -2067,7 +2834,20 @@ function SourceViewer({
                 </span>
               ) : <span className="ai-source-note-spacer" />}
               <code>
-                <CodeLineContent line={line} explanation={explanation} jump={jump} onJump={onJump} />
+                <CodeLineContent
+                  line={line}
+                  references={references}
+                  explanation={explanation}
+                  jump={jump}
+                  onJump={onJump}
+                  onReferenceJump={(referenceJump, reference) => onJump({
+                    triggerText: reference.symbol,
+                    label: referenceJump.label,
+                    nodeId: referenceJump.nodeId,
+                    filePath: referenceJump.filePath,
+                    line: referenceJump.line,
+                  })}
+                />
               </code>
             </div>
           );
@@ -2077,12 +2857,32 @@ function SourceViewer({
   );
 }
 
-function buildSourceLineJumps(source: SourceResponse | null, detail: ProjectDetail | null, lines: string[]) {
+function buildSourceLineReferences(source: SourceResponse | null, detail: ProjectDetail | null) {
+  const referencesByLine = new Map<number, SourceLineReference[]>();
+  if (!source || !detail) {
+    return referencesByLine;
+  }
+  detail.references
+    .filter((reference) => reference.span.filePath === source.path)
+    .forEach((reference) => {
+      const lineReferences = referencesByLine.get(reference.span.beginLine) ?? [];
+      lineReferences.push({
+        reference,
+        jump: referenceTargetJump(detail, reference),
+      });
+      referencesByLine.set(reference.span.beginLine, lineReferences);
+    });
+  referencesByLine.forEach((lineReferences) => {
+    lineReferences.sort((left, right) => left.reference.span.beginColumn - right.reference.span.beginColumn);
+  });
+  return referencesByLine;
+}
+
+function buildDeclarationLineJumps(source: SourceResponse | null, detail: ProjectDetail | null) {
   const jumps = new Map<number, SourceLineJump>();
   if (!source || !detail) {
     return jumps;
   }
-  const nodesById = new Map(detail.graphNodes.map((node) => [node.id, node]));
   const fileClasses = detail.classes.filter((classInfo) => classInfo.filePath === source.path);
   fileClasses.forEach((classInfo) => {
     jumps.set(classInfo.beginLine, {
@@ -2100,28 +2900,6 @@ function buildSourceLineJumps(source: SourceResponse | null, detail: ProjectDeta
         filePath: classInfo.filePath,
         line: method.beginLine,
       });
-      detail.graphEdges
-        .filter((edge) => edge.type === "CALLS" && edge.source === method.id)
-        .forEach((edge) => {
-          const target = nodesById.get(edge.target);
-          if (!target || target.type !== "method") {
-            return;
-          }
-          for (let lineNo = method.beginLine + 1; lineNo <= method.endLine; lineNo += 1) {
-            const line = lines[lineNo - 1] ?? "";
-            if (!lineCallsMethod(line, target.label)) {
-              continue;
-            }
-            jumps.set(lineNo, {
-              triggerText: target.label,
-              label: `跳转到 ${ownerClassName(detail, target.id) ? `${ownerClassName(detail, target.id)}.` : ""}${target.label}`,
-              nodeId: target.id,
-              filePath: target.filePath,
-              line: target.line,
-            });
-            break;
-          }
-        });
     });
   });
   return jumps;
@@ -2129,15 +2907,37 @@ function buildSourceLineJumps(source: SourceResponse | null, detail: ProjectDeta
 
 function CodeLineContent({
   line,
+  references,
   explanation,
   jump,
   onJump,
+  onReferenceJump,
 }: {
   line: string;
+  references: SourceLineReference[];
   explanation?: SourceLineExplanation;
   jump?: SourceLineJump;
   onJump: (jump: SourceLineJump) => void;
+  onReferenceJump: (jump: ReferenceJump, reference: CodeReference) => void;
 }) {
+  if (references.length) {
+    return (
+      <>
+        {splitLineByReferences(line, references).map((segment, index) => {
+          if (typeof segment === "string") {
+            return <React.Fragment key={`text-${index}`}>{segment}</React.Fragment>;
+          }
+          return (
+            <ReferenceToken
+              key={segment.reference.id}
+              segment={segment}
+              onReferenceJump={onReferenceJump}
+            />
+          );
+        })}
+      </>
+    );
+  }
   const triggerText = explanation?.triggerText ?? jump?.triggerText;
   const code = line || " ";
   if (!triggerText) {
@@ -2175,6 +2975,70 @@ function CodeLineContent({
       {after}
     </>
   );
+}
+
+function splitLineByReferences(line: string, references: SourceLineReference[]) {
+  const segments: Array<string | SourceLineReference> = [];
+  const code = line || " ";
+  let cursor = 0;
+  references.forEach((lineReference) => {
+    const reference = lineReference.reference;
+    const start = clampNumber(reference.span.beginColumn - 1, cursor, code.length);
+    const preferredEnd = reference.span.beginLine === reference.span.endLine
+      ? reference.span.endColumn
+      : reference.span.beginColumn - 1 + Math.max(reference.symbol.length, 1);
+    const end = clampNumber(Math.max(start + 1, preferredEnd), start + 1, code.length);
+    if (start < cursor || start >= code.length) {
+      return;
+    }
+    if (start > cursor) {
+      segments.push(code.slice(cursor, start));
+    }
+    segments.push({
+      ...lineReference,
+      reference: {
+        ...reference,
+        symbol: code.slice(start, end) || reference.symbol,
+      },
+    });
+    cursor = end;
+  });
+  if (cursor < code.length) {
+    segments.push(code.slice(cursor));
+  }
+  return segments.length ? segments : [code];
+}
+
+function ReferenceToken({
+  segment,
+  onReferenceJump,
+}: {
+  segment: SourceLineReference;
+  onReferenceJump: (jump: ReferenceJump, reference: CodeReference) => void;
+}) {
+  const reference = segment.reference;
+  const jump = segment.jump;
+  const title = [reference.detail, jump?.label].filter(Boolean).join(" · ");
+  return (
+    <button
+      className={`source-code-trigger reference-token ${reference.kind.toLowerCase().replace("_", "-")} ${jump ? "jumpable" : ""}`}
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        if (jump) {
+          onReferenceJump(jump, reference);
+        }
+      }}
+      title={title || undefined}
+    >
+      {reference.symbol}
+    </button>
+  );
+}
+
+function fileLocationLabel(filePath: string, line: number) {
+  const fileName = filePath.split(/[\\/]/).pop() ?? filePath;
+  return `${fileName}:${line}`;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

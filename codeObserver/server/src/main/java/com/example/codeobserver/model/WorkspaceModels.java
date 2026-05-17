@@ -33,7 +33,9 @@ public final class WorkspaceModels {
             List<ClassInfo> classes,
             List<GraphNode> graphNodes,
             List<GraphEdge> graphEdges,
-            List<ReadingStep> readingPath
+            List<CodeReference> references,
+            List<ReadingStep> readingPath,
+            List<FlowInfo> flows
     ) {
     }
 
@@ -57,13 +59,17 @@ public final class WorkspaceModels {
             List<FieldInfo> fields,
             List<MethodInfo> methods,
             List<String> nestedClasses,
-            List<String> concepts
+            List<String> concepts,
+            List<String> superTypes
     ) {
     }
 
     public record FieldInfo(
+            String id,
             String name,
-            String type
+            String type,
+            int beginLine,
+            int endLine
     ) {
     }
 
@@ -76,7 +82,28 @@ public final class WorkspaceModels {
             int endLine,
             List<String> calls,
             List<String> creates,
-            List<String> concepts
+            List<String> concepts,
+            String kind,
+            List<String> parameterTypes,
+            List<CallSiteInfo> callSites,
+            List<String> readsFields,
+            List<String> writesFields,
+            List<String> branchFacts,
+            List<String> exceptionFacts
+    ) {
+    }
+
+    public record CallSiteInfo(
+            String kind,
+            String name,
+            String targetOwner,
+            String targetSignature,
+            String targetId,
+            String receiverType,
+            Integer line,
+            Boolean resolved,
+            Boolean inLambda,
+            List<String> argumentTypes
     ) {
     }
 
@@ -95,7 +122,28 @@ public final class WorkspaceModels {
             String source,
             String target,
             String type,
-            String label
+            String label,
+            Map<String, Object> data
+    ) {
+    }
+
+    public record SourceSpan(
+            String filePath,
+            int beginLine,
+            int beginColumn,
+            int endLine,
+            int endColumn
+    ) {
+    }
+
+    public record CodeReference(
+            String id,
+            String kind,
+            String sourceNodeId,
+            String targetNodeId,
+            String symbol,
+            String detail,
+            SourceSpan span
     ) {
     }
 
@@ -109,6 +157,30 @@ public final class WorkspaceModels {
     ) {
     }
 
+    public record FlowInfo(
+            String id,
+            String title,
+            String summary,
+            String entryNodeId,
+            List<String> nodeIds,
+            String sourceKind,
+            double confidence,
+            List<String> tags,
+            List<FlowStep> steps
+    ) {
+    }
+
+    public record FlowStep(
+            String nodeId,
+            String title,
+            String description,
+            String filePath,
+            int line,
+            List<String> stateReads,
+            List<String> stateWrites
+    ) {
+    }
+
     public record SourceResponse(
             String path,
             String content
@@ -119,6 +191,7 @@ public final class WorkspaceModels {
             String projectId,
             String root,
             String selectedNodeId,
+            String flowId,
             FlowTrace trace,
             String question
     ) {
@@ -128,7 +201,16 @@ public final class WorkspaceModels {
             String projectId,
             String root,
             String selectedNodeId,
+            String flowId,
             FlowTrace trace
+    ) {
+    }
+
+    public record AiFlowRecommendationRequest(
+            String projectId,
+            String root,
+            String selectedNodeId,
+            String instruction
     ) {
     }
 
@@ -136,8 +218,21 @@ public final class WorkspaceModels {
             String projectId,
             String root,
             String selectedNodeId,
+            String flowId,
             FlowTrace trace,
-            String task
+            String task,
+            List<PinnedSourceSnippet> pinnedSnippets
+    ) {
+    }
+
+    public record PinnedSourceSnippet(
+            String id,
+            String label,
+            String filePath,
+            int beginLine,
+            int endLine,
+            String nodeId,
+            String source
     ) {
     }
 
@@ -164,9 +259,28 @@ public final class WorkspaceModels {
     ) {
     }
 
+    public record AiFlowRecommendationResponse(
+            List<FlowInfo> flows,
+            String model
+    ) {
+    }
+
     public record AiCodingContextResponse(
             String content,
             String model
+    ) {
+    }
+
+    public record OpenInIdeRequest(
+            String path,
+            int line
+    ) {
+    }
+
+    public record OpenInIdeResponse(
+            boolean ok,
+            String message,
+            String command
     ) {
     }
 
