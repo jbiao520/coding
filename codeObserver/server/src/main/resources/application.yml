@@ -1,0 +1,29 @@
+server:
+  port: 8088
+
+spring:
+  application:
+    name: code-observer
+  ai:
+    model:
+      chat: none
+    deepseek:
+      chat:
+        enabled: false
+
+observer:
+  max-depth: 7
+
+learning-flow:
+  ai:
+    mode: ${LEARNING_FLOW_AI_MODE:deepseek}
+    url: ${LEARNING_FLOW_AI_URL:https://api.deepseek.com}
+    api-key-file: ${LEARNING_FLOW_AI_API_KEY_FILE:~/.dstoken.txt}
+    model: ${LEARNING_FLOW_AI_MODEL:deepseek-v4-flash}
+    context-model: ${LEARNING_FLOW_AI_CONTEXT_MODEL:deepseek-v4-flash}
+    topic-plan-model: ${LEARNING_FLOW_AI_TOPIC_PLAN_MODEL:deepseek-v4-pro}
+    require-api-key: ${LEARNING_FLOW_AI_REQUIRE_API_KEY:true}
+    max-tokens: ${LEARNING_FLOW_AI_MAX_TOKENS:4096}
+    temperature: ${LEARNING_FLOW_AI_TEMPERATURE:0.2}
+    timeout: ${LEARNING_FLOW_AI_TIMEOUT:60s}
+    thinking-enabled: ${LEARNING_FLOW_AI_THINKING_ENABLED:false}

@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# IntelliJ IDEA local project state
+.idea/
+
+# Java / Maven build output
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Node / Vite dependencies and output
+node_modules/
+dist/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.p12
+*.keystore
+id_rsa*
+*.key
+.dstoken.txt
